@@ -4,111 +4,64 @@ import { RunningTradeManager } from '../electron/main/trade/RunningTradeManager'
 import { Database } from '../electron/main/database/Database';
 import { TradeRepository } from '../electron/main/database/repositories/TradeRepository';
 import { TradingAction, TradeOutcome } from '../shared/types/decision';
+import { PlatformMode } from '../shared/types/canonical';
+import { FEATURE_NAMES } from '../electron/main/decision/MLEngine';
 import * as fs from 'fs';
 import * as path from 'path';
 
-describe('Sprint T9 Self-Learning Preparation & Dataset Quality Engine Tests', () => {
-  let db: Database;
-  let tradeRepo: TradeRepository;
-  let tradeManager: RunningTradeManager;
-  let datasetManager: SelfLearningDatasetManager;
-  const testDbPath = path.join(__dirname, 'test-t9-learning.db');
-
+describe('verified self-learning dataset', () => {
+  let db: Database; let manager: RunningTradeManager; let dataset: SelfLearningDatasetManager;
+  const dbPath = path.join(__dirname, 'test-t9-learning.db');
   beforeEach(async () => {
-    if (fs.existsSync(testDbPath)) {
-      try { fs.unlinkSync(testDbPath); } catch {}
-    }
-    db = new Database(testDbPath);
-    await db.initialize();
-
-    tradeRepo = new TradeRepository(db);
-
-    tradeManager = RunningTradeManager.getInstance();
-    tradeManager.clearAll();
-    tradeManager.setRepository(tradeRepo);
-
-    datasetManager = SelfLearningDatasetManager.getInstance();
-    datasetManager.setDatabase(db);
+    for (const candidate of [dbPath, `${dbPath}.bak`]) if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+    db = new Database(dbPath); await db.initialize();
+    manager = RunningTradeManager.getInstance(); manager.clearAll(); manager.setRepository(new TradeRepository(db));
+    dataset = SelfLearningDatasetManager.getInstance(); dataset.setDatabase(db);
+  });
+  afterEach(() => { manager.clearAll(); db.close(); for (const candidate of [dbPath, `${dbPath}.bak`]) if (fs.existsSync(candidate)) fs.unlinkSync(candidate); });
+  const register = (id: string, mode = PlatformMode.LIVE, features: number[] | undefined = new Array(FEATURE_NAMES.length).fill(0.5)) => manager.registerTrade({
+    sessionId: 'learning-session', signalId: `manual-${id}`, asset: 'EUR/USD', direction: TradingAction.BUY,
+    expirySeconds: 60, confidence: 0.85, entryPrice: '1.0850', eventId: id, platformMode: mode, mlFeatures: features,
   });
 
-  afterEach(() => {
-    if (tradeManager) tradeManager.clearAll();
-    if (db) db.close();
-    if (fs.existsSync(testDbPath)) {
-      try { fs.unlinkSync(testDbPath); } catch {}
-    }
+  it('extracts only real, verified LIVE price-complete records', () => {
+    const live = register('live')!; const demo = register('demo', PlatformMode.DEMO)!;
+    manager.resolveTradeOutcome(live.id, TradeOutcome.WIN, '1.0870');
+    manager.resolveTradeOutcome(demo.id, TradeOutcome.WIN, '1.0870');
+    const records = dataset.getCompleteLearningRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ tradeId: live.id, asset: 'EUR/USD', direction: 'BUY', entryPrice: 1.085, exitPrice: 1.087, confidence: 0.85 });
+    expect(records[0].mlFeatures).toHaveLength(FEATURE_NAMES.length);
+    expect(records[0].runtimeMetadata.version).toBe('3.0.1-rc.1');
   });
 
-  it('Task 1: extracts complete 28-field learning records for completed trades', () => {
-    const t = tradeManager.registerTrade({
-      sessionId: 'session-t9-1',
-      asset: 'EUR/USD',
-      direction: TradingAction.BUY,
-      expirySeconds: 60,
-      confidence: 0.85,
-      entryPrice: '1.0850',
-      eventId: 'evt-t9-1',
-    });
-
-    expect(t).not.toBeNull();
-    tradeManager.resolveTradeOutcome(t!.id, TradeOutcome.WIN, '1.0870');
-
-    const records = datasetManager.getCompleteLearningRecords();
-    expect(records.length).toBe(1);
-
-    const r = records[0];
-    expect(r.tradeId).toBe(t!.id);
-    expect(r.asset).toBe('EUR/USD');
-    expect(r.direction).toBe('BUY');
-    expect(r.entryPrice).toBe(1.0850);
-    expect(r.exitPrice).toBe(1.0870);
-    expect(r.result).toBe('WIN');
-    expect(r.decisionTrace).toContain('Decision:BUY');
-    expect(r.runtimeMetadata.sessionId).toBe('session-t9-1');
+  it('normalizes legacy percent confidence and removes impossible values instead of inventing 0.5', () => {
+    const legacy = register('legacy')!; const invalid = register('invalid')!;
+    manager.resolveTradeOutcome(legacy.id, TradeOutcome.WIN, '1.0870');
+    manager.resolveTradeOutcome(invalid.id, TradeOutcome.LOSS, '1.0830');
+    db.prepare('UPDATE tracked_trades SET confidence = 85 WHERE id = ?').run(legacy.id);
+    db.prepare('UPDATE tracked_trades SET confidence = 150 WHERE id = ?').run(invalid.id);
+    const report = dataset.auditAndRepairDataQuality();
+    expect(report.anomaliesDetected.impossibleConfidence).toEqual(expect.arrayContaining([legacy.id, invalid.id]));
+    expect(db.prepare('SELECT confidence FROM tracked_trades WHERE id = ?').get(legacy.id)).toEqual({ confidence: 0.85 });
+    expect(db.prepare('SELECT confidence FROM tracked_trades WHERE id = ?').get(invalid.id)).toEqual({ confidence: null });
   });
 
-  it('Task 2: detects and automatically repairs data quality anomalies', () => {
-    const t = tradeManager.registerTrade({
-      sessionId: 'session-t9-2',
-      asset: 'GBP/USD',
-      direction: TradingAction.SELL,
-      expirySeconds: 60,
-      confidence: 0.9,
-      eventId: 'evt-t9-2',
-    });
-
-    tradeManager.resolveTradeOutcome(t!.id, TradeOutcome.LOSS, '1.2650');
-
-    // Introduce an anomaly directly in DB for testing repair
-    db.prepare(`UPDATE tracked_trades SET confidence = 150 WHERE id = ?`).run(t!.id);
-
-    const report = datasetManager.auditAndRepairDataQuality();
-    expect(report.totalRecordsChecked).toBeGreaterThan(0);
-    expect(report.repairedRecordsCount).toBeGreaterThan(0);
+  it('requires real entry and completion prices for a valid replay', () => {
+    const trade = register('replay')!;
+    manager.resolveTradeOutcome(trade.id, TradeOutcome.WIN, '1.0870');
+    expect(dataset.validateTradeReplay(trade.id)).toMatchObject({ isValidReplay: true, matchedEntry: true, matchedExit: true });
+    db.prepare('UPDATE tracked_trades SET completion_price = NULL WHERE id = ?').run(trade.id);
+    expect(dataset.validateTradeReplay(trade.id).isValidReplay).toBe(false);
   });
 
-  it('Task 4: performs step-by-step trade replay validation', () => {
-    const t = tradeManager.registerTrade({
-      sessionId: 'session-t9-3',
-      asset: 'USD/JPY',
-      direction: TradingAction.BUY,
-      expirySeconds: 60,
-      eventId: 'evt-t9-3',
-    });
-
-    tradeManager.resolveTradeOutcome(t!.id, TradeOutcome.WIN, '155.20');
-
-    const replay = datasetManager.validateTradeReplay(t!.id);
-    expect(replay.isValidReplay).toBe(true);
-    expect(replay.matchedDecision).toBe(true);
-    expect(replay.matchedOutcome).toBe(true);
-  });
-
-  it('Task 5: evaluates Model Readiness Score cleanly', () => {
-    const score = datasetManager.getModelReadinessScore();
-    expect(score).toHaveProperty('readinessScorePct');
-    expect(score).toHaveProperty('datasetQualityPct');
-    expect(score).toHaveProperty('featureCompletenessPct');
-    expect(score).toHaveProperty('readinessStatus');
+  it('reports missing ML features honestly instead of treating defaults as complete', () => {
+    const complete = register('complete')!; const incomplete = register('incomplete', PlatformMode.LIVE, undefined)!;
+    manager.resolveTradeOutcome(complete.id, TradeOutcome.WIN, '1.0870');
+    manager.resolveTradeOutcome(incomplete.id, TradeOutcome.LOSS, '1.0830');
+    const score = dataset.getModelReadinessScore();
+    expect(score.sampleCount).toBe(2);
+    expect(score.featureCompletenessPct).toBe(50);
+    expect(score.readinessStatus).toBe('INSUFFICIENT_SAMPLES');
   });
 });
