@@ -1,5 +1,5 @@
 // ============================================================
-// MARS PRO V3 â€” Electron Main Process Entry
+// MARS PRO V3 — Electron Main Process Entry
 // Security-first Electron configuration with embedded browser workstation layout.
 // ============================================================
 
@@ -19,6 +19,10 @@ import { SettingsRepository } from './database/repositories/SettingsRepository';
 import { EmbeddedBrowserManager } from './view/EmbeddedBrowserManager';
 import { RunningTradeManager } from './trade/RunningTradeManager';
 import { TradeRepository } from './database/repositories/TradeRepository';
+import {
+  isTrustedDevServerUrl,
+  isTrustedRendererNavigation,
+} from './security/urlPolicy';
 
 // Global process exception safety
 process.on('uncaughtException', (err) => {
@@ -40,11 +44,19 @@ if (!gotTheLock) {
   let database: Database | null = null;
   let isShuttingDown = false;
 
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  const configuredDevServerUrl = process.env.VITE_DEV_SERVER_URL;
+  const devServerUrl = configuredDevServerUrl && isTrustedDevServerUrl(configuredDevServerUrl)
+    ? configuredDevServerUrl
+    : undefined;
+
+  if (configuredDevServerUrl && !devServerUrl) {
+    console.error('[MARS SECURITY] Ignoring untrusted VITE_DEV_SERVER_URL. Only loopback origins are allowed.');
+  }
 
   function createMainWindow(): BrowserWindow {
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width, height } = primaryDisplay.workAreaSize;
+    const distHtmlPath = path.join(__dirname, '../../dist/index.html');
 
     const win = new BrowserWindow({
       width: Math.min(1600, Math.round(width * 0.9)),
@@ -52,7 +64,7 @@ if (!gotTheLock) {
       minWidth: 1024,
       minHeight: 700,
       title: 'MARS PRO V3 Workstation',
-      frame: false, // Custom integrated title bar
+      frame: false,
       backgroundColor: '#0a0e17',
       show: false,
       webPreferences: {
@@ -64,33 +76,41 @@ if (!gotTheLock) {
       },
     });
 
-    // Prevent navigation to external URLs in the UI frame
+    // Restrict the privileged renderer/preload pair to the exact packaged file
+    // or the exact loopback development origin. Never use string-prefix checks.
     win.webContents.on('will-navigate', (event, url) => {
-      if (!url.startsWith('file://') && !url.startsWith('http://localhost')) {
+      if (!isTrustedRendererNavigation(url, distHtmlPath, devServerUrl)) {
+        console.warn(`[MARS SECURITY] Blocked renderer navigation to ${url}`);
         event.preventDefault();
       }
     });
 
     // Block new window creation
-    win.webContents.setWindowOpenHandler(() => {
-      return { action: 'deny' };
-    });
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
     win.once('ready-to-show', () => {
-      if (win && !win.isDestroyed()) {
+      if (!win.isDestroyed()) {
         win.show();
         win.maximize();
       }
     });
 
-    const distHtmlPath = path.join(__dirname, '../../dist/index.html');
-
     if (devServerUrl) {
-      win.loadURL(devServerUrl);
+      void win.loadURL(devServerUrl);
     } else if (fs.existsSync(distHtmlPath)) {
-      win.loadFile(distHtmlPath);
+      void win.loadFile(distHtmlPath);
     } else {
-      win.loadURL('http://localhost:5173');
+      const errorPage = encodeURIComponent(`
+        <!doctype html>
+        <html lang="en">
+          <head><meta charset="utf-8"><title>MARS build missing</title></head>
+          <body style="font-family:Segoe UI,sans-serif;background:#0a0e17;color:#f8fafc;padding:32px">
+            <h1>MARS renderer build is missing</h1>
+            <p>Run <code>npm run build</code>, then start the application again.</p>
+          </body>
+        </html>
+      `);
+      void win.loadURL(`data:text/html;charset=utf-8,${errorPage}`);
     }
 
     return win;
@@ -136,47 +156,38 @@ if (!gotTheLock) {
 
   async function initializeApp(): Promise<void> {
     try {
-      // Initialize database
       const dbPath = path.join(app.getPath('userData'), 'mars-pro.db');
       database = new Database(dbPath);
       await database.initialize();
 
-      // Create main window
       mainWindow = createMainWindow();
 
-      // Initialize embedded browser manager inside main workstation window
       EmbeddedBrowserManager.getInstance().initialize(mainWindow, 'https://olymptrade.com');
 
       mainWindow.on('resize', () => {
         EmbeddedBrowserManager.getInstance().updateBounds();
       });
 
-      // Initialize overlay manager
       overlayManager = new OverlayManager();
       overlayManager.createWindows();
 
-      // Initialize analysis controller (launches in strict STOPPED state)
-      analysisController = new AnalysisController(overlayManager, mainWindow, database!);
+      analysisController = new AnalysisController(overlayManager, mainWindow, database);
 
-      // Initialize trade manager with DB connection
-      const tradeRepo = new TradeRepository(database!);
+      const tradeRepo = new TradeRepository(database);
       RunningTradeManager.getInstance().setRepository(tradeRepo);
       RunningTradeManager.getInstance().loadAndRecoverPendingTrades();
 
-      // Initialize settings repository
-      const settingsRepo = new SettingsRepository(database!);
+      const settingsRepo = new SettingsRepository(database);
 
-      // Register IPC handlers
       registerIpcHandlers(
         ipcMain,
         analysisController,
         overlayManager,
-        database!,
+        database,
         mainWindow,
-        settingsRepo
+        settingsRepo,
       );
 
-      // Handle second instance
       app.on('second-instance', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           if (mainWindow.isMinimized()) mainWindow.restore();
@@ -208,8 +219,7 @@ if (!gotTheLock) {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      initializeApp();
+      void initializeApp();
     }
   });
 }
-
