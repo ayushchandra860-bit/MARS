@@ -15,6 +15,7 @@ import { AnalysisController } from './lifecycle/AnalysisController';
 import { OverlayManager } from './overlay/OverlayManager';
 import { Database } from './database/Database';
 import { registerIpcHandlers } from './ipc/handlers';
+import { registerAnalyticsIpcHandlers } from './ipc/analyticsHandlers';
 import { SettingsRepository } from './database/repositories/SettingsRepository';
 import { EmbeddedBrowserManager } from './view/EmbeddedBrowserManager';
 import { RunningTradeManager } from './trade/RunningTradeManager';
@@ -24,7 +25,6 @@ import {
   isTrustedRendererNavigation,
 } from './security/urlPolicy';
 
-// Global process exception safety
 process.on('uncaughtException', (err) => {
   console.error('[MARS MAIN FATAL] Uncaught Exception:', err);
 });
@@ -33,7 +33,6 @@ process.on('unhandledRejection', (reason) => {
   console.error('[MARS MAIN FATAL] Unhandled Rejection:', reason);
 });
 
-// Single-instance lock
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -76,8 +75,6 @@ if (!gotTheLock) {
       },
     });
 
-    // Restrict the privileged renderer/preload pair to the exact packaged file
-    // or the exact loopback development origin. Never use string-prefix checks.
     win.webContents.on('will-navigate', (event, url) => {
       if (!isTrustedRendererNavigation(url, distHtmlPath, devServerUrl)) {
         console.warn(`[MARS SECURITY] Blocked renderer navigation to ${url}`);
@@ -85,7 +82,6 @@ if (!gotTheLock) {
       }
     });
 
-    // Block new window creation
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
     win.once('ready-to-show', () => {
@@ -187,6 +183,7 @@ if (!gotTheLock) {
         mainWindow,
         settingsRepo,
       );
+      registerAnalyticsIpcHandlers(ipcMain);
 
       app.on('second-instance', () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
