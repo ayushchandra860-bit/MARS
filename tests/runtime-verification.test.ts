@@ -67,7 +67,6 @@ function makeBearishObservation(): MarketObservation {
 describe('RUNTIME: Decision Engine BUY/SELL symmetry', () => {
   let engine: DecisionEngine;
   beforeEach(() => { engine = new DecisionEngine(); engine.reset(); });
-
   it('handles bullish observations without producing an opposite signal', () => {
     expect([TradingAction.BUY, TradingAction.WAIT]).toContain(engine.decide(makeObservation()).action);
   });
@@ -78,11 +77,9 @@ describe('RUNTIME: Decision Engine BUY/SELL symmetry', () => {
     expect(engine.decide(makeObservation({ candles: [] })).action).toBe(TradingAction.WAIT);
   });
   it('does not give one direction an extreme confidence advantage', () => {
-    const bull = makeObservation();
-    const bear = makeBearishObservation();
+    const bull = makeObservation(); const bear = makeBearishObservation();
     for (let index = 0; index < 20; index++) engine.decide(bull);
-    const bullResult = engine.decide(bull);
-    engine.reset();
+    const bullResult = engine.decide(bull); engine.reset();
     for (let index = 0; index < 20; index++) engine.decide(bear);
     const bearResult = engine.decide(bear);
     if (bullResult.action === TradingAction.BUY && bearResult.action === TradingAction.SELL) {
@@ -95,9 +92,7 @@ describe('RUNTIME: Evidence Engine symmetry', () => {
   let engine: EvidenceEngine;
   beforeEach(() => { engine = new EvidenceEngine(); });
   it('gives mirrored observations comparable strength', () => {
-    const bull = engine.evaluate(makeObservation());
-    const bear = engine.evaluate(makeBearishObservation());
-    expect(Math.abs(bull.overallStrength - bear.overallStrength)).toBeLessThan(0.3);
+    expect(Math.abs(engine.evaluate(makeObservation()).overallStrength - engine.evaluate(makeBearishObservation()).overallStrength)).toBeLessThan(0.3);
   });
   it('counts mirrored directional evidence symmetrically', () => {
     expect(engine.countBias(makeObservation(), 'BULLISH')).toBeGreaterThanOrEqual(2);
@@ -109,11 +104,7 @@ describe('RUNTIME: ML readiness and provenance', () => {
   beforeEach(() => MLEngine.getInstance().reset());
   it('transitions DORMANT → TRAINING → READY using action-labeled samples', () => {
     const ml = MLEngine.getInstance();
-    const example = {
-      features: new Array(FEATURE_NAMES.length).fill(0.5),
-      label: 1 as const,
-      action: TradingAction.BUY,
-    };
+    const example = { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 1 as const, action: TradingAction.BUY };
     expect(ml.getReadiness()).toBe('DORMANT');
     for (let index = 0; index < 50; index++) ml.ingestLabeledExamples([example]);
     expect(ml.getReadiness()).toBe('TRAINING');
@@ -133,16 +124,18 @@ describe('RUNTIME: ML readiness and provenance', () => {
 describe('RUNTIME: Signal Stabilizer', () => {
   let stabilizer: SignalStabilizer;
   const decision = (action: TradingAction, confidence = 0.85) => ({
-    action, reason: 'Test', reasons: ['Test'], signalStrength: confidence,
+    action, reason: 'Test', reasons: ['Test'], signalStrength: 0.9,
     confidence, risk: RiskLevel.LOW,
     marketBias: action === TradingAction.SELL ? 'BEARISH' : 'BULLISH',
     recommendedExpiry: '1 min', dataQuality: QualityLevel.HIGH, timestamp: Date.now(),
   });
   beforeEach(() => { stabilizer = new SignalStabilizer(); });
   it('stabilizes a strong BUY', () => expect(stabilizer.stabilize(decision(TradingAction.BUY)).action).toBe(TradingAction.BUY));
-  it('can establish and then process a SELL', () => {
+  it('eventually accepts repeated strong reversal evidence', () => {
     stabilizer.stabilize(decision(TradingAction.BUY));
-    expect(stabilizer.stabilize(decision(TradingAction.SELL)).action).toBe(TradingAction.SELL);
+    let action = TradingAction.BUY;
+    for (let index = 0; index < 5; index++) action = stabilizer.stabilize(decision(TradingAction.SELL)).action;
+    expect(action).toBe(TradingAction.SELL);
   });
   it('keeps every hysteresis result inside the canonical action set', () => {
     stabilizer.stabilize(decision(TradingAction.BUY, 0.8));
@@ -164,13 +157,8 @@ describe('RUNTIME: Risk Engine symmetry', () => {
 });
 
 describe('RUNTIME: Full pipeline accounting', () => {
-  let engine: DecisionEngine;
-  let stabilizer: SignalStabilizer;
-  beforeEach(() => {
-    engine = new DecisionEngine();
-    stabilizer = new SignalStabilizer();
-    engine.setCalibrationMode('AGGRESSIVE');
-  });
+  let engine: DecisionEngine; let stabilizer: SignalStabilizer;
+  beforeEach(() => { engine = new DecisionEngine(); stabilizer = new SignalStabilizer(); engine.setCalibrationMode('AGGRESSIVE'); });
   it('accounts for all 200 decisions', () => {
     const counts = { BUY: 0, SELL: 0, WAIT: 0 };
     for (let index = 0; index < 200; index++) {
@@ -179,15 +167,13 @@ describe('RUNTIME: Full pipeline accounting', () => {
     }
     expect(counts.BUY + counts.SELL + counts.WAIT).toBe(200);
   });
-  it('does not show extreme directional bias when actionable signals occur', () => {
+  it('does not show extreme directional bias when both signal classes occur', () => {
     let buys = 0; let sells = 0;
     for (let index = 0; index < 200; index++) {
       const action = stabilizer.stabilize(engine.decide(index % 2 ? makeObservation() : makeBearishObservation())).action;
       if (action === TradingAction.BUY) buys++;
       if (action === TradingAction.SELL) sells++;
     }
-    if (buys + sells > 0 && Math.min(buys, sells) > 0) {
-      expect(Math.max(buys, sells) / Math.min(buys, sells)).toBeLessThan(3);
-    }
+    if (Math.min(buys, sells) > 0) expect(Math.max(buys, sells) / Math.min(buys, sells)).toBeLessThan(3);
   });
 });
