@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: quality-${{ github.ref }}
@@ -39,7 +40,36 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run test
+      - name: Run Vitest
+        id: vitest
+        shell: bash
+        run: |
+          set +e
+          npm run test 2>&1 | tee vitest-output.txt
+          test_status=${PIPESTATUS[0]}
+          echo "status=${test_status}" >> "$GITHUB_OUTPUT"
+          exit "${test_status}"
+      - name: Publish Vitest failure summary
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          {
+            echo '<!-- mars-vitest-failure -->'
+            echo '### Vitest failure summary'
+            echo
+            echo "Commit: \`${GITHUB_SHA}\`"
+            echo
+            echo '<details><summary>Last 180 lines</summary>'
+            echo
+            echo '```text'
+            tail -n 180 vitest-output.txt
+            echo '```'
+            echo '</details>'
+          } > vitest-comment.md
+          gh pr comment "$PR_NUMBER" --body-file vitest-comment.md
 
   typecheck:
     name: Electron and frontend typecheck
