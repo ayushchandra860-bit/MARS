@@ -71,6 +71,15 @@ export class TradeLifecycleManager {
     return Array.from(this.activeTrades.values()).find((trade) => trade.signalId === signalId);
   }
 
+  public findTradeByExecutionId(executionId: string, sessionId?: string): AuthoritativeTradeRecord | undefined {
+    const normalized = String(executionId || '').trim();
+    if (!normalized) return undefined;
+    const matches = Array.from(this.activeTrades.values()).filter(
+      (trade) => trade.executionId === normalized && (!sessionId || trade.sessionId === sessionId),
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
   private pruneDeduplicationState(now: number): void {
     const retentionMs = this.DUPLICATE_LOCKOUT_MS * 4;
     for (const [key, timestamp] of this.recentLockouts) {
@@ -104,12 +113,11 @@ export class TradeLifecycleManager {
     const now = Date.now();
     this.pruneDeduplicationState(now);
     const assetKey = params.asset?.trim().toUpperCase() || 'UNKNOWN';
+    const executionId = params.executionId?.trim() || params.eventId?.trim() || undefined;
 
     if (params.eventId) {
       if (this.recentEventIds.has(params.eventId)) {
-        return Array.from(this.activeTrades.values()).find(
-          (trade) => trade.executionId === params.eventId,
-        ) ?? null;
+        return executionId ? this.findTradeByExecutionId(executionId) ?? null : null;
       }
       this.recentEventIds.add(params.eventId);
     }
@@ -117,6 +125,11 @@ export class TradeLifecycleManager {
     if (params.signalId) {
       const existing = this.findTradeBySignal(params.signalId);
       if (existing) return existing;
+    }
+
+    if (executionId) {
+      const existingByExecution = this.findTradeByExecutionId(executionId);
+      if (existingByExecution) return existingByExecution;
     }
 
     const lockoutKey = params.eventId
@@ -135,7 +148,7 @@ export class TradeLifecycleManager {
       id: tradeId,
       sessionId: params.sessionId,
       signalId: params.signalId,
-      executionId: params.executionId || params.eventId,
+      executionId,
       asset: params.asset,
       direction: params.direction,
       entryTimestamp: now,
@@ -248,6 +261,37 @@ export class TradeLifecycleManager {
     return this.tradeRepo?.completeTrade(tradeId, outcome, completionPrice ?? null) ?? false;
   }
 
+  /** Resolve only a single active record carrying the exact durable execution ID. */
+  public resolveTradeByExecutionId(
+    executionId: string,
+    outcome: TradeOutcome,
+    completionPrice?: string | null,
+    sessionId?: string,
+  ): boolean {
+    const normalized = String(executionId || '').trim();
+    if (!normalized) return false;
+
+    const memoryMatches = Array.from(this.activeTrades.values()).filter(
+      (trade) => trade.executionId === normalized && (!sessionId || trade.sessionId === sessionId),
+    );
+    if (memoryMatches.length === 1) {
+      return this.resolveTradeOutcome(memoryMatches[0].id, outcome, completionPrice ?? null);
+    }
+    if (memoryMatches.length > 1) {
+      console.warn('[TradeLifecycleManager] Ambiguous execution ID rejected in memory.');
+      return false;
+    }
+
+    const durableMatches = this.tradeRepo?.getActiveTradesByExecutionId(normalized, sessionId) ?? [];
+    if (durableMatches.length !== 1) {
+      if (durableMatches.length > 1) {
+        console.warn('[TradeLifecycleManager] Ambiguous durable execution ID rejected.');
+      }
+      return false;
+    }
+    return this.resolveTradeOutcome(durableMatches[0].id, outcome, completionPrice ?? null);
+  }
+
   /**
    * Timing-only result correlation is permitted only when exactly one eligible
    * trade exists. Multiple candidates are deliberately left unresolved.
@@ -284,6 +328,7 @@ export class TradeLifecycleManager {
           id: trade.id,
           session_id: trade.sessionId,
           signal_id: trade.signalId || `manual-${trade.id}`,
+          execution_id: trade.executionId ?? null,
           action: trade.direction,
           asset: trade.asset,
           timeframe: trade.timeframe ?? null,
@@ -361,6 +406,7 @@ export class TradeLifecycleManager {
       id: dbTrade.id,
       sessionId: dbTrade.session_id,
       signalId: dbTrade.signal_id,
+      executionId: dbTrade.execution_id || undefined,
       asset: dbTrade.asset,
       direction: dbTrade.action as TradingAction,
       entryTimestamp: dbTrade.entry_timestamp,

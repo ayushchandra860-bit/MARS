@@ -2,6 +2,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+const OLYMP_TRADE_HOSTS = new Set(['olymptrade.com', 'www.olymptrade.com']);
+export const OLYMP_TRADE_PLATFORM_URL = 'https://olymptrade.com/platform';
 
 /**
  * Development renderer URLs must stay on an explicit loopback origin.
@@ -20,6 +22,34 @@ export function isTrustedDevServerUrl(rawUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The embedded workstation may navigate only to explicitly approved Olymp
+ * Trade HTTPS hosts. Look-alike domains, credentials, non-default ports and
+ * unsafe protocols are rejected.
+ */
+export function isTrustedOlympTradeUrl(rawUrl: string): boolean {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 2048) return false;
+  try {
+    const url = new URL(rawUrl);
+    return (
+      url.protocol === 'https:' &&
+      OLYMP_TRADE_HOSTS.has(url.hostname.toLowerCase()) &&
+      (url.port === '' || url.port === '443') &&
+      url.username === '' &&
+      url.password === ''
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeOlympTradeUrl(rawUrl: unknown): string {
+  if (typeof rawUrl !== 'string' || !isTrustedOlympTradeUrl(rawUrl)) {
+    return OLYMP_TRADE_PLATFORM_URL;
+  }
+  return new URL(rawUrl).toString();
 }
 
 function normalizeFilePath(filePath: string): string {

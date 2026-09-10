@@ -26,17 +26,19 @@ describe('Browser Workstation trade registration', () => {
   afterEach(() => {
     manager.clearAll();
     db.close();
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    for (const candidate of [dbPath, `${dbPath}.bak`]) {
+      if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+    }
   });
 
   it('rejects timing-only result attribution when multiple trades are active', () => {
     const first = manager.registerTrade({
-      sessionId: 'live-browser', signalId: 'browser-click-1', asset: 'EUR/USD',
+      sessionId: 'live-browser', signalId: 'browser-click-1', executionId: 'exec-1', asset: 'EUR/USD',
       direction: TradingAction.BUY, expirySeconds: 60, eventId: 'click-1',
       platformMode: PlatformMode.LIVE,
     });
     const second = manager.registerTrade({
-      sessionId: 'live-browser', signalId: 'browser-click-2', asset: 'GBP/USD',
+      sessionId: 'live-browser', signalId: 'browser-click-2', executionId: 'exec-2', asset: 'GBP/USD',
       direction: TradingAction.SELL, expirySeconds: 120, eventId: 'click-2',
       platformMode: PlatformMode.LIVE,
     });
@@ -52,15 +54,37 @@ describe('Browser Workstation trade registration', () => {
     expect(completed).toEqual({ status: 'COMPLETED', outcome: 'LOSS', completion_price: '1.0900' });
   });
 
-  it('resolves a single durable trade after an in-memory browser reload', () => {
+  it('resolves an exact execution ID and never completes its active neighbor', () => {
+    const first = manager.registerTrade({
+      sessionId: 'live-browser', signalId: 'exact-signal-1', executionId: 'exact-exec-1', asset: 'EUR/USD',
+      direction: TradingAction.BUY, eventId: 'exact-click-1', platformMode: PlatformMode.LIVE,
+    });
+    const second = manager.registerTrade({
+      sessionId: 'live-browser', signalId: 'exact-signal-2', executionId: 'exact-exec-2', asset: 'GBP/USD',
+      direction: TradingAction.SELL, eventId: 'exact-click-2', platformMode: PlatformMode.LIVE,
+    });
+
+    expect(manager.resolveTradeByExecutionId('exact-exec-2', TradeOutcome.WIN, null)).toBe(true);
+    expect(db.prepare('SELECT status, outcome FROM tracked_trades WHERE id = ?').get(second!.id))
+      .toEqual({ status: 'COMPLETED', outcome: 'WIN' });
+    expect(db.prepare('SELECT status, outcome FROM tracked_trades WHERE id = ?').get(first!.id))
+      .toEqual({ status: 'ACTIVE', outcome: null });
+  });
+
+  it('restores execution correlation after an in-memory browser reload', () => {
     const trade = manager.registerTrade({
-      sessionId: 'live-browser', signalId: 'browser-reload-click', asset: 'EUR/USD',
+      sessionId: 'live-browser', signalId: 'browser-reload-click', executionId: 'reload-execution', asset: 'EUR/USD',
       direction: TradingAction.SELL, expirySeconds: 60, eventId: 'reload-click',
       platformMode: PlatformMode.LIVE,
     });
     expect(trade).not.toBeNull();
+    expect(db.prepare('SELECT execution_id FROM tracked_trades WHERE id = ?').get(trade!.id))
+      .toEqual({ execution_id: 'reload-execution' });
+
     manager.clearAll();
-    expect(manager.resolveNextActiveTrade(TradeOutcome.WIN, '1.0800', 'live-browser')).toBe(true);
+    manager.loadAndRecoverPendingTrades('live-browser');
+    expect(manager.findTradeByExecutionId('reload-execution')?.id).toBe(trade!.id);
+    expect(manager.resolveTradeByExecutionId('reload-execution', TradeOutcome.WIN, '1.0800')).toBe(true);
     expect(db.prepare(
       'SELECT status, outcome, completion_price FROM tracked_trades WHERE id = ?',
     ).get(trade!.id)).toEqual({ status: 'COMPLETED', outcome: 'WIN', completion_price: '1.0800' });

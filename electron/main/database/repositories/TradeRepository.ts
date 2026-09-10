@@ -14,6 +14,7 @@ export interface DbTrackedTrade {
   id: string;
   session_id: string;
   signal_id: string;
+  execution_id: string | null;
   action: string;
   asset: string | null;
   timeframe: string | null;
@@ -47,6 +48,8 @@ export class TradeRepository {
     sessionId?: string;
     signal_id?: string;
     signalId?: string;
+    execution_id?: string | null;
+    executionId?: string | null;
     action: TradingAction;
     asset: string | null;
     timeframe: string | null;
@@ -77,6 +80,10 @@ export class TradeRepository {
     const originalReasonsJson = trade.original_reasons ?? JSON.stringify(reasonsArr);
     const sessionId = trade.sessionId ?? trade.session_id ?? `session-${Date.now()}`;
     const signalId = trade.signalId ?? trade.signal_id ?? `manual-${trade.id}`;
+    const rawExecutionId = trade.executionId ?? trade.execution_id ?? null;
+    const executionId = typeof rawExecutionId === 'string' && rawExecutionId.trim()
+      ? rawExecutionId.trim()
+      : null;
     const expiryLabel = trade.expiryLabel ?? trade.expiry_label ?? '1 min';
     const expirySec = trade.expirySeconds ?? trade.expiry_seconds ?? 60;
     const entryTimestamp = trade.entryTimestamp ?? trade.entry_timestamp ?? Date.now();
@@ -88,15 +95,16 @@ export class TradeRepository {
 
     const result = this.db.prepare(
       `INSERT OR IGNORE INTO tracked_trades (
-        id, session_id, signal_id, action, asset, timeframe,
+        id, session_id, signal_id, execution_id, action, asset, timeframe,
         expiry_label, expiry_seconds, confidence, regime,
         entry_price, entry_timestamp, expiry_timestamp,
         status, original_reasons, ml_features, platform_mode
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       trade.id,
       sessionId,
       signalId,
+      executionId,
       trade.action,
       trade.asset,
       trade.timeframe,
@@ -247,6 +255,17 @@ export class TradeRepository {
     return this.db.prepare(
       `SELECT * FROM tracked_trades ${whereClause} ORDER BY entry_timestamp DESC`
     ).all(...(sessionId ? [sessionId] : [])) as DbTrackedTrade[];
+  }
+
+  getActiveTradesByExecutionId(executionId: string, sessionId?: string): DbTrackedTrade[] {
+    const normalized = String(executionId || '').trim();
+    if (!normalized) return [];
+    const whereClause = sessionId
+      ? "execution_id = ? AND session_id = ? AND status IN ('ACTIVE', 'EXPIRING')"
+      : "execution_id = ? AND status IN ('ACTIVE', 'EXPIRING')";
+    return this.db.prepare(
+      `SELECT * FROM tracked_trades WHERE ${whereClause} ORDER BY entry_timestamp DESC`
+    ).all(...(sessionId ? [normalized, sessionId] : [normalized])) as DbTrackedTrade[];
   }
 
   getExpiredTrades(sessionId?: string): DbTrackedTrade[] {
