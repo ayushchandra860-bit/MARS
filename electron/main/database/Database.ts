@@ -98,10 +98,6 @@ export class Database {
     }, 1000);
   }
 
-  /**
-   * Kept asynchronous for callers, while the bounded sql.js snapshot is written
-   * synchronously and atomically to prevent overlapping exports/renames.
-   */
   async flushAsync(): Promise<void> {
     this.saveToFile();
   }
@@ -147,8 +143,6 @@ export class Database {
       try {
         fs.renameSync(tempPath, this.dbPath);
       } catch (replaceError) {
-        // Windows may not replace an existing file with rename(). Move the old
-        // primary aside first, then restore it if the new rename fails.
         if (!fs.existsSync(this.dbPath)) throw replaceError;
         if (fs.existsSync(stalePath)) fs.unlinkSync(stalePath);
         fs.renameSync(this.dbPath, stalePath);
@@ -167,9 +161,7 @@ export class Database {
       try {
         const directoryFd = fs.openSync(directory, 'r');
         try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
-      } catch {
-        // Directory fsync is unsupported on some Windows filesystems.
-      }
+      } catch {}
     } finally {
       if (fs.existsSync(tempPath)) {
         try { fs.unlinkSync(tempPath); } catch {}
@@ -331,8 +323,9 @@ export class Database {
   }
 
   private getCurrentVersion(): number {
-    const row = this.prepare('SELECT MAX(version) as version FROM schema_migrations').get()
-      as { version: number | null } | undefined;
+    const row = this.prepare('SELECT MAX(version) as version FROM schema_migrations').get() as
+      | { version: number | null }
+      | undefined;
     return row?.version ?? 0;
   }
 
@@ -447,8 +440,6 @@ export class Database {
 
   private migrateV6(): void {
     this.addColumnIfMissing('tracked_trades', 'execution_id', 'TEXT DEFAULT NULL');
-
-    // Repair historical orphan sessions created while FK checks were disabled.
     this.exec(`
       INSERT OR IGNORE INTO sessions (id, started_at, display_id)
       SELECT session_id, MIN(timestamp), 'recovered'
@@ -456,7 +447,6 @@ export class Database {
       WHERE session_id IS NOT NULL AND TRIM(session_id) != ''
       GROUP BY session_id;
     `);
-
     this.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_trades_execution_unique
       ON tracked_trades(session_id, execution_id)
