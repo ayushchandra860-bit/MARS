@@ -15,29 +15,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Typecheck, test, and build
+  ipc-contract:
+    name: IPC contract audit
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 10
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - run: npm ci
+      - run: npm run verify:ipc
 
-      - name: Install locked dependencies
-        run: npm ci
+  tests:
+    name: Vitest suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test
 
-      - name: Audit IPC contract
-        run: npm run verify:ipc
+  typecheck:
+    name: Electron and frontend typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
 
-      - name: Run test suite
-        run: npm run test
-
-      - name: Build application
-        run: npm run build
+  build:
+    name: Production build verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
