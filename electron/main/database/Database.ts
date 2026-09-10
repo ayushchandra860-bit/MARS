@@ -111,6 +111,10 @@ export class Database {
 
     const snapshotVersion = this.mutationVersion;
     const buffer = Buffer.from(this.db.export());
+    // sql.js reopens the in-memory database during export(), which resets
+    // connection-scoped PRAGMAs. Reinstate FK enforcement before any caller
+    // can run another statement.
+    this.db.exec('PRAGMA foreign_keys = ON;');
     try {
       this.atomicReplace(buffer);
       this.persistedVersion = snapshotVersion;
