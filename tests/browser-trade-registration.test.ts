@@ -5,6 +5,7 @@ import { Database } from '../electron/main/database/Database';
 import { TradeRepository } from '../electron/main/database/repositories/TradeRepository';
 import { RunningTradeManager } from '../electron/main/trade/RunningTradeManager';
 import { TradeOutcome, TradingAction } from '../shared/types/decision';
+import { PlatformMode } from '../shared/types/canonical';
 
 describe('Browser Workstation trade registration', () => {
   let db: Database;
@@ -13,10 +14,7 @@ describe('Browser Workstation trade registration', () => {
   let manager: RunningTradeManager;
 
   beforeEach(async () => {
-    dbPath = path.join(
-      __dirname,
-      `browser-trade-registration-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
-    );
+    dbPath = path.join(__dirname, `browser-trade-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     db = new Database(dbPath);
     await db.initialize();
     repository = new TradeRepository(db);
@@ -31,70 +29,50 @@ describe('Browser Workstation trade registration', () => {
     if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
   });
 
-  it('persists a detected browser click and applies the next detected result to the matching pending trade', () => {
+  it('rejects timing-only result attribution when multiple trades are active', () => {
     const first = manager.registerTrade({
-      sessionId: 'live-browser',
-      signalId: 'browser-click-1',
-      asset: 'Crypto Composite Index',
-      direction: TradingAction.BUY,
-      expirySeconds: 60,
-      eventId: 'click-1',
+      sessionId: 'live-browser', signalId: 'browser-click-1', asset: 'EUR/USD',
+      direction: TradingAction.BUY, expirySeconds: 60, eventId: 'click-1',
+      platformMode: PlatformMode.LIVE,
     });
     const second = manager.registerTrade({
-      sessionId: 'live-browser',
-      signalId: 'browser-click-2',
-      asset: 'Crypto Composite Index',
-      direction: TradingAction.SELL,
-      expirySeconds: 120,
-      eventId: 'click-2',
+      sessionId: 'live-browser', signalId: 'browser-click-2', asset: 'GBP/USD',
+      direction: TradingAction.SELL, expirySeconds: 120, eventId: 'click-2',
+      platformMode: PlatformMode.LIVE,
     });
-
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
+    expect(manager.resolveNextActiveTrade(TradeOutcome.LOSS, null, 'live-browser')).toBe(false);
     expect(repository.getActiveTrades('live-browser')).toHaveLength(2);
 
-    expect(
-      manager.resolveNextActiveTrade(TradeOutcome.LOSS, '-100.00', 'live-browser'),
-    ).toBe(true);
-
+    expect(manager.resolveTradeOutcome(first!.id, TradeOutcome.LOSS, '1.0900')).toBe(true);
     const completed = db.prepare(
       'SELECT status, outcome, completion_price FROM tracked_trades WHERE id = ?',
-    ).get(first!.id) as { status: string; outcome: string; completion_price: string };
-    expect(completed).toEqual({
-      status: 'COMPLETED',
-      outcome: 'LOSS',
-      completion_price: '-100.00',
-    });
-
-    const stillActive = repository.getActiveTrades('live-browser');
-    expect(stillActive).toHaveLength(1);
-    expect(stillActive[0].id).toBe(second!.id);
+    ).get(first!.id);
+    expect(completed).toEqual({ status: 'COMPLETED', outcome: 'LOSS', completion_price: '1.0900' });
   });
 
-  it('uses the durable database record when a result arrives after an in-memory browser reload', () => {
+  it('resolves a single durable trade after an in-memory browser reload', () => {
     const trade = manager.registerTrade({
-      sessionId: 'live-browser',
-      signalId: 'browser-reload-click',
-      asset: 'EUR/USD',
-      direction: TradingAction.SELL,
-      expirySeconds: 60,
-      eventId: 'reload-click',
+      sessionId: 'live-browser', signalId: 'browser-reload-click', asset: 'EUR/USD',
+      direction: TradingAction.SELL, expirySeconds: 60, eventId: 'reload-click',
+      platformMode: PlatformMode.LIVE,
     });
     expect(trade).not.toBeNull();
-
     manager.clearAll();
-
-    expect(
-      manager.resolveNextActiveTrade(TradeOutcome.WIN, '85.00', 'live-browser'),
-    ).toBe(true);
-
-    const completed = db.prepare(
+    expect(manager.resolveNextActiveTrade(TradeOutcome.WIN, '1.0800', 'live-browser')).toBe(true);
+    expect(db.prepare(
       'SELECT status, outcome, completion_price FROM tracked_trades WHERE id = ?',
-    ).get(trade!.id) as { status: string; outcome: string; completion_price: string };
-    expect(completed).toEqual({
-      status: 'COMPLETED',
-      outcome: 'WIN',
-      completion_price: '85.00',
+    ).get(trade!.id)).toEqual({ status: 'COMPLETED', outcome: 'WIN', completion_price: '1.0800' });
+  });
+
+  it('persists platform mode as part of authoritative trade provenance', () => {
+    const trade = manager.registerTrade({
+      sessionId: 'demo-browser', asset: 'EUR/USD', direction: TradingAction.BUY,
+      eventId: 'demo-click', platformMode: PlatformMode.DEMO,
     });
+    expect(trade?.platformMode).toBe(PlatformMode.DEMO);
+    expect(db.prepare('SELECT platform_mode FROM tracked_trades WHERE id = ?').get(trade!.id))
+      .toEqual({ platform_mode: 'DEMO' });
   });
 });

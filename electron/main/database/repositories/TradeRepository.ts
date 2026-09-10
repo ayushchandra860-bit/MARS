@@ -1,7 +1,6 @@
 // ============================================================
 // MARS PRO V3 — Canonical Trade Repository
-// Manages tracked trade lifecycle: creation, active monitoring, completion.
-// Ensures atomic operations and deduplication with INSERT OR IGNORE.
+// Durable tracked-trade lifecycle, retention, and guarded learning ingestion.
 // ============================================================
 
 import { Database } from '../Database';
@@ -73,22 +72,21 @@ export class TradeRepository {
     completion_timestamp?: number | null;
     completion_price?: string | null;
     platformMode?: PlatformMode;
-  }): void {
-    const reasonsArr = (trade.reasons && trade.reasons.length > 0)
-      ? trade.reasons
-      : (trade.snapshot?.reasons || []);
-    const originalReasonsJson = trade.original_reasons || JSON.stringify(reasonsArr);
+  }): boolean {
+    const reasonsArr = trade.reasons?.length ? trade.reasons : (trade.snapshot?.reasons || []);
+    const originalReasonsJson = trade.original_reasons ?? JSON.stringify(reasonsArr);
+    const sessionId = trade.sessionId ?? trade.session_id ?? `session-${Date.now()}`;
+    const signalId = trade.signalId ?? trade.signal_id ?? `manual-${trade.id}`;
+    const expiryLabel = trade.expiryLabel ?? trade.expiry_label ?? '1 min';
+    const expirySec = trade.expirySeconds ?? trade.expiry_seconds ?? 60;
+    const entryTimestamp = trade.entryTimestamp ?? trade.entry_timestamp ?? Date.now();
+    const expiryTimestamp = trade.expiryTimestamp
+      ?? trade.expiry_timestamp
+      ?? (entryTimestamp + expirySec * 1000);
+    const entryPrice = trade.entryPrice ?? trade.entry_price ?? null;
+    const status = trade.status ?? 'ACTIVE';
 
-    const sessionId = trade.sessionId || trade.session_id || `session-${Date.now()}`;
-    const signalId = trade.signalId || trade.signal_id || `manual-${trade.id}`;
-    const expiryLabel = trade.expiryLabel || trade.expiry_label || '1 min';
-    const expirySec = trade.expirySeconds || trade.expiry_seconds || 60;
-    const entryTimestamp = trade.entryTimestamp || trade.entry_timestamp || Date.now();
-    const expiryTimestamp = trade.expiryTimestamp || trade.expiry_timestamp || (entryTimestamp + expirySec * 1000);
-    const entryPrice = trade.entryPrice || trade.entry_price || null;
-    const status = trade.status || 'ACTIVE';
-
-    this.db.prepare(
+    const result = this.db.prepare(
       `INSERT OR IGNORE INTO tracked_trades (
         id, session_id, signal_id, action, asset, timeframe,
         expiry_label, expiry_seconds, confidence, regime,
@@ -111,18 +109,29 @@ export class TradeRepository {
       expiryTimestamp,
       status,
       originalReasonsJson,
-      trade.mlFeatures ? JSON.stringify(trade.mlFeatures) : (trade.ml_features || null),
-      trade.platformMode || null
+      trade.mlFeatures ? JSON.stringify(trade.mlFeatures) : (trade.ml_features ?? null),
+      trade.platformMode ?? PlatformMode.UNKNOWN,
     );
+    return result.changes === 1;
   }
 
-  completeTrade(id: string, outcome: TradeOutcome, completionPrice: string): void {
+  completeTrade(
+    id: string,
+    outcome: TradeOutcome,
+    completionPrice: string | null = null,
+  ): boolean {
     const now = Date.now();
-    let completedTrade: { asset: string | null; ml_features: string | null } | null = null;
+    let completedTrade: {
+      asset: string | null;
+      ml_features: string | null;
+      platform_mode: string | null;
+      entry_price: string | null;
+    } | null = null;
+    let didComplete = false;
 
     this.db.transaction(() => {
       const tradeRow = this.db.prepare(
-        `SELECT signal_id, status, outcome, asset, ml_features
+        `SELECT signal_id, status, outcome, asset, ml_features, platform_mode, entry_price
          FROM tracked_trades WHERE id = ?`
       ).get(id) as {
         signal_id?: string;
@@ -130,23 +139,26 @@ export class TradeRepository {
         outcome?: string | null;
         asset?: string | null;
         ml_features?: string | null;
+        platform_mode?: string | null;
+        entry_price?: string | null;
       } | undefined;
 
       if (!tradeRow || ['COMPLETED', 'CANCELLED', 'ARCHIVED'].includes(tradeRow.status || '')) return;
-      completedTrade = {
-        asset: tradeRow.asset ?? null,
-        ml_features: tradeRow.ml_features ?? null,
-      };
 
       const updated = this.db.prepare(
         `UPDATE tracked_trades
          SET status = 'COMPLETED', outcome = ?, completion_timestamp = ?, completion_price = ?
          WHERE id = ? AND status IN ('ACTIVE', 'EXPIRING', 'PENDING_ENTRY')`
       ).run(outcome, now, completionPrice, id);
-      if (updated.changes !== 1) {
-        completedTrade = null;
-        return;
-      }
+      if (updated.changes !== 1) return;
+
+      didComplete = true;
+      completedTrade = {
+        asset: tradeRow.asset ?? null,
+        ml_features: tradeRow.ml_features ?? null,
+        platform_mode: tradeRow.platform_mode ?? null,
+        entry_price: tradeRow.entry_price ?? null,
+      };
 
       if (tradeRow.signal_id) {
         this.db.prepare(
@@ -159,22 +171,48 @@ export class TradeRepository {
       this.pruneCompletedTradesInTransaction();
     });
 
-    const resolvedForLearning = completedTrade as { asset: string | null; ml_features: string | null } | null;
-    if (resolvedForLearning && (outcome === TradeOutcome.WIN || outcome === TradeOutcome.LOSS)) {
+    const learning = completedTrade as {
+      asset: string | null;
+      ml_features: string | null;
+      platform_mode: string | null;
+      entry_price: string | null;
+    } | null;
+    const entryValue = Number(learning?.entry_price);
+    const completionValue = Number(completionPrice);
+    const verifiedLiveOutcome = learning
+      && learning.platform_mode === PlatformMode.LIVE
+      && Number.isFinite(entryValue)
+      && entryValue > 0
+      && Number.isFinite(completionValue)
+      && completionValue > 0;
+
+    if (verifiedLiveOutcome && (outcome === TradeOutcome.WIN || outcome === TradeOutcome.LOSS)) {
       try {
-        const parsed = resolvedForLearning.ml_features ? JSON.parse(resolvedForLearning.ml_features) : null;
-        if (Array.isArray(parsed) && parsed.length >= FEATURE_NAMES.length &&
-            parsed.slice(0, FEATURE_NAMES.length).every((value: unknown) => typeof value === 'number' && Number.isFinite(value))) {
+        const parsed = learning.ml_features ? JSON.parse(learning.ml_features) : null;
+        if (Array.isArray(parsed)
+          && parsed.length >= FEATURE_NAMES.length
+          && parsed.slice(0, FEATURE_NAMES.length)
+            .every((value: unknown) => typeof value === 'number' && Number.isFinite(value))) {
           MLEngine.getInstance().ingestCompletedTrade({
             features: parsed.slice(0, FEATURE_NAMES.length),
             outcome: outcome as 'WIN' | 'LOSS',
-            asset: resolvedForLearning.asset ?? undefined,
+            asset: learning.asset ?? undefined,
           });
         }
-      } catch (err) {
-        console.error('[TradeRepository] Post-trade learning failed:', err);
+      } catch (error) {
+        console.error('[TradeRepository] Post-trade learning failed:', error);
       }
     }
+
+    return didComplete;
+  }
+
+  markExpiring(id: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE tracked_trades SET status = 'EXPIRING'
+       WHERE id = ? AND status = 'ACTIVE'`
+    ).run(id);
+    return result.changes === 1;
   }
 
   enforceCompletedTradeLimit(): number {
@@ -186,7 +224,7 @@ export class TradeRepository {
   }
 
   private pruneCompletedTradesInTransaction(): number {
-    const result = this.db.prepare(
+    return this.db.prepare(
       `DELETE FROM tracked_trades
        WHERE status = 'COMPLETED'
          AND id NOT IN (
@@ -195,46 +233,41 @@ export class TradeRepository {
            ORDER BY completion_timestamp DESC, entry_timestamp DESC, id DESC
            LIMIT ?
          )`
-    ).run(MAX_RETAINED_COMPLETED_TRADES);
-    return result.changes;
+    ).run(MAX_RETAINED_COMPLETED_TRADES).changes;
   }
 
   cancelTrade(id: string): void {
-    this.db.prepare(
-      `UPDATE tracked_trades SET status = 'CANCELLED' WHERE id = ?`
-    ).run(id);
+    this.db.prepare("UPDATE tracked_trades SET status = 'CANCELLED' WHERE id = ?").run(id);
   }
 
   getActiveTrades(sessionId?: string): DbTrackedTrade[] {
     const whereClause = sessionId
-      ? `WHERE status IN ('ACTIVE', 'EXPIRING') AND session_id = ?`
-      : `WHERE status IN ('ACTIVE', 'EXPIRING')`;
-    const params = sessionId ? [sessionId] : [];
+      ? "WHERE status IN ('ACTIVE', 'EXPIRING') AND session_id = ?"
+      : "WHERE status IN ('ACTIVE', 'EXPIRING')";
     return this.db.prepare(
       `SELECT * FROM tracked_trades ${whereClause} ORDER BY entry_timestamp DESC`
-    ).all(...params) as DbTrackedTrade[];
+    ).all(...(sessionId ? [sessionId] : [])) as DbTrackedTrade[];
   }
 
   getExpiredTrades(sessionId?: string): DbTrackedTrade[] {
     const whereClause = sessionId
-      ? `WHERE status IN ('ACTIVE', 'EXPIRING') AND expiry_timestamp <= ? AND session_id = ?`
-      : `WHERE status IN ('ACTIVE', 'EXPIRING') AND expiry_timestamp <= ?`;
-    const params = sessionId ? [Date.now(), sessionId] : [Date.now()];
+      ? "WHERE status IN ('ACTIVE', 'EXPIRING') AND expiry_timestamp <= ? AND session_id = ?"
+      : "WHERE status IN ('ACTIVE', 'EXPIRING') AND expiry_timestamp <= ?";
     return this.db.prepare(
       `SELECT * FROM tracked_trades ${whereClause} ORDER BY expiry_timestamp ASC`
-    ).all(...params) as DbTrackedTrade[];
+    ).all(...(sessionId ? [Date.now(), sessionId] : [Date.now()])) as DbTrackedTrade[];
   }
 
   getActiveTradeCount(): number {
     const row = this.db.prepare(
-      `SELECT COUNT(*) as count FROM tracked_trades WHERE status IN ('ACTIVE', 'EXPIRING')`
+      "SELECT COUNT(*) as count FROM tracked_trades WHERE status IN ('ACTIVE', 'EXPIRING')"
     ).get() as { count: number } | undefined;
     return row?.count ?? 0;
   }
 
   hasActiveTradeForSignal(signalId: string): boolean {
     const row = this.db.prepare(
-      `SELECT COUNT(*) as count FROM tracked_trades WHERE signal_id = ? AND status IN ('ACTIVE', 'EXPIRING')`
+      "SELECT COUNT(*) as count FROM tracked_trades WHERE signal_id = ? AND status IN ('ACTIVE', 'EXPIRING')"
     ).get(signalId) as { count: number } | undefined;
     return (row?.count ?? 0) > 0;
   }
@@ -245,12 +278,6 @@ export class TradeRepository {
        WHERE status = 'COMPLETED' AND outcome IS NOT NULL AND outcome != 'UNRESOLVED'
        ORDER BY completion_timestamp DESC LIMIT ?`
     ).all(limit) as Array<{ outcome: string }>;
-    return rows
-      .map(r => {
-        if (r.outcome === 'WIN') return 'W' as const;
-        if (r.outcome === 'LOSS') return 'L' as const;
-        return 'D' as const;
-      })
-      .reverse();
+    return rows.map((row) => row.outcome === 'WIN' ? 'W' : row.outcome === 'LOSS' ? 'L' : 'D').reverse();
   }
 }
