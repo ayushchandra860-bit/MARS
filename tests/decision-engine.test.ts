@@ -4,7 +4,15 @@ import { EvidenceEngine } from '../electron/main/decision/EvidenceEngine';
 import { MarketObservation } from '../shared/types/observation';
 import { QualityLevel, CandleDirection, CandleObservation } from '../shared/types/scanner';
 import { TradingAction, WaitReason, RiskLevel } from '../shared/types/decision';
-import { TrendDirection, MomentumLevel, VolatilityLevel, MarketStructure, MarketRegime } from '../shared/types/market';
+import {
+  TrendDirection,
+  MomentumLevel,
+  VolatilityLevel,
+  MarketStructure,
+  MarketRegime,
+  SRInteractionState,
+  StructuralLevel,
+} from '../shared/types/market';
 
 function createFullObservation(overrides: Partial<MarketObservation> = {}): MarketObservation {
   const candles: CandleObservation[] = Array.from({ length: 10 }, (_, i) => ({
@@ -20,6 +28,7 @@ function createFullObservation(overrides: Partial<MarketObservation> = {}): Mark
   }));
 
   return {
+    observationId: 'obs-test',
     sessionId: 'test-session',
     frameId: 'test-frame',
     timestamp: Date.now(),
@@ -58,10 +67,21 @@ function createFullObservation(overrides: Partial<MarketObservation> = {}): Mark
       nearestSupport: null,
       nearestResistance: null,
     },
-    patternEvidence: {
-      patterns: [],
-    },
+    patternEvidence: { patterns: [] },
     ...overrides,
+  };
+}
+
+function level(pricePx: number, role: 'SUPPORT' | 'RESISTANCE'): StructuralLevel {
+  return {
+    pricePx,
+    touchCount: 3,
+    strength: 0.8,
+    strengthLabel: 'STRONG',
+    role,
+    distancePts: 10,
+    interactionState: SRInteractionState.APPROACHING,
+    reactionDetail: 'test level',
   };
 }
 
@@ -86,12 +106,8 @@ describe('EvidenceEngine Dynamic Weighting Verification', () => {
   });
 
   it('verifies dynamic weighting changes overall strength according to MarketRegime', () => {
-    const trendingObs = createFullObservation({ marketRegime: MarketRegime.TRENDING });
-    const rangingObs = createFullObservation({ marketRegime: MarketRegime.RANGING });
-
-    const trendingRes = evidenceEngine.evaluate(trendingObs);
-    const rangingRes = evidenceEngine.evaluate(rangingObs);
-
+    const trendingRes = evidenceEngine.evaluate(createFullObservation({ marketRegime: MarketRegime.TRENDING }));
+    const rangingRes = evidenceEngine.evaluate(createFullObservation({ marketRegime: MarketRegime.RANGING }));
     expect(trendingRes.overallStrength).toBeGreaterThan(0);
     expect(rangingRes.overallStrength).toBeGreaterThan(0);
     expect(trendingRes.overallStrength).not.toBe(rangingRes.overallStrength);
@@ -102,14 +118,13 @@ describe('DecisionEngine', () => {
   const engine = new DecisionEngine();
 
   it('outputs BUY when bullish trend, strong momentum, and high agreement exist', () => {
-    const obs = createFullObservation();
-    const result = engine.decide(obs);
+    const result = engine.decide(createFullObservation());
     expect(result.action).toBe(TradingAction.BUY);
     expect(result.signalStrength).toBeGreaterThan(0.6);
   });
 
   it('outputs WAIT with SIDEWAYS_MARKET when market bias is neutral', () => {
-    const obs = createFullObservation({
+    const result = engine.decide(createFullObservation({
       trendEvidence: {
         direction: TrendDirection.NEUTRAL,
         strength: 0.2,
@@ -121,37 +136,78 @@ describe('DecisionEngine', () => {
         swingPoints: [],
         confidence: 0.5,
       },
-    });
-    const result = engine.decide(obs);
+    }));
     expect(result.action).toBe(TradingAction.WAIT);
     expect(result.reason).toBe(WaitReason.SIDEWAYS_MARKET);
   });
 
   it('outputs WAIT with WEAK_MOMENTUM when momentum is weak', () => {
-    const obs = createFullObservation({
+    const result = engine.decide(createFullObservation({
       momentumEvidence: {
         level: MomentumLevel.WEAK,
         directionalConsistency: 0.3,
         averageBodyRatio: 0.2,
         acceleration: -0.1,
       },
-    });
-    const result = engine.decide(obs);
+    }));
     expect(result.action).toBe(TradingAction.WAIT);
     expect(result.reason).toBe(WaitReason.WEAK_MOMENTUM);
   });
 
-  it('outputs WAIT with CONFLICTING_SIGNALS when risk is HIGH', () => {
-    const obs = createFullObservation({
+  it('outputs WAIT when risk is high', () => {
+    const result = engine.decide(createFullObservation({
       volatilityEvidence: {
         level: VolatilityLevel.HIGH,
         normalizedRange: 4.5,
         rangeStdDev: 2.0,
       },
       dataQuality: QualityLevel.ACCEPTABLE,
-    });
-    const result = engine.decide(obs);
-    // High volatility + acceptable quality should elevate risk or produce WAIT
+    }));
     expect(result.action).toBe(TradingAction.WAIT);
+  });
+
+  it('keeps pullback detection in pixel space regardless of OCR market price scale', () => {
+    const observation = createFullObservation({
+      currentPrice: 50000,
+      supportResistanceEvidence: {
+        levels: [],
+        nearestSupport: level(68, 'SUPPORT'),
+        nearestResistance: level(35, 'RESISTANCE'),
+      },
+    });
+    const setup = engine.evaluateStrategicSetup(
+      observation,
+      MarketRegime.TRENDING,
+      MomentumLevel.STRONG,
+      MarketStructure.UPTREND,
+    );
+    expect(engine.getLatestClosePx(observation)).toBe(60);
+    expect(setup?.type).toBe('PULLBACK_ENTRY');
+    expect(setup?.direction).toBe(TradingAction.BUY);
+  });
+
+  it('keeps R:R invariant when only OCR market price changes', () => {
+    const supportResistanceEvidence = {
+      levels: [],
+      nearestSupport: level(90, 'SUPPORT'),
+      nearestResistance: level(40, 'RESISTANCE'),
+    };
+    const forex = createFullObservation({ currentPrice: 1.092, supportResistanceEvidence });
+    const gold = createFullObservation({ currentPrice: 5000, supportResistanceEvidence });
+    expect(engine.computeRRScore(forex, TradingAction.BUY))
+      .toBe(engine.computeRRScore(gold, TradingAction.BUY));
+  });
+
+  it('scores risk/reward for the selected direction instead of the better opposite side', () => {
+    const observation = createFullObservation({
+      supportResistanceEvidence: {
+        levels: [],
+        nearestSupport: level(90, 'SUPPORT'),
+        nearestResistance: level(40, 'RESISTANCE'),
+      },
+    });
+    const buyScore = engine.computeRRScore(observation, TradingAction.BUY);
+    const sellScore = engine.computeRRScore(observation, TradingAction.SELL);
+    expect(buyScore).toBeLessThan(sellScore);
   });
 });
