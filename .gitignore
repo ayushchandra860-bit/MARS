@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.freebuff/
+.mars-audit/
+.env
+*.local
+*.log
+
+.git-backup/
