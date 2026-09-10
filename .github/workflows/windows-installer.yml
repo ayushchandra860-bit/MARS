@@ -1,0 +1,73 @@
+name: Windows Installer
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-windows:
+    name: Build Windows x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Test, typecheck, build, and package
+        run: npm run package
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path release -Filter *.exe
+          if ($files.Count -eq 0) { throw 'No Windows executables were produced.' }
+          $lines = $files | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Encoding utf8 release/SHA256SUMS.txt
+          Get-ChildItem release
+
+      - name: Upload downloadable Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: MARS-PRO-V3-Windows-${{ github.run_number }}
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem -Path release -Include *.exe,SHA256SUMS.txt -File
+          if ($files.Count -eq 0) { throw 'No release files were produced.' }
+          $paths = $files | ForEach-Object { $_.FullName }
+          gh release create "${{ github.ref_name }}" @paths --title "MARS PRO V3 ${{ github.ref_name }}" --generate-notes
