@@ -27,8 +27,6 @@ jobs:
     steps:
       - name: Check out release source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -67,22 +65,12 @@ jobs:
           $checksums | Set-Content -Encoding utf8 release/SHA256SUMS.txt
           Get-ChildItem release | Format-Table Name,Length
 
-      - name: Upload verified workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: MARS-PRO-V3-Fixed-Version-1-Windows-${{ github.run_number }}
-          path: |
-            release/*.exe
-            release/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Publish direct-download GitHub prerelease
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Start-Transcript -Path ci-logs/release-publish.log | Out-Null
+          $log = 'ci-logs/release-publish.log'
           try {
             $marker = (Get-Content .github/release/publish-fixed-v1 -Raw).Trim()
             if ($marker -ne $env:RELEASE_TAG) { throw 'Publish marker does not match RELEASE_TAG.' }
@@ -94,18 +82,7 @@ jobs:
               $_.Extension -eq '.exe' -or $_.Name -eq 'SHA256SUMS.txt'
             })
             if ($assets.Count -lt 3) { throw 'Installer, portable app or checksum file is missing.' }
-            $assetPaths = $assets | ForEach-Object { $_.FullName }
-
-            git fetch --tags --force
-            git rev-parse -q --verify "refs/tags/$env:RELEASE_TAG" *> $null
-            if ($LASTEXITCODE -ne 0) {
-              git config user.name 'github-actions[bot]'
-              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-              git tag -a $env:RELEASE_TAG $env:GITHUB_SHA -m 'MARS PRO V3 Fixed Version 1 RC'
-              if ($LASTEXITCODE -ne 0) { throw 'Could not create release tag.' }
-              git push origin "refs/tags/$env:RELEASE_TAG"
-              if ($LASTEXITCODE -ne 0) { throw 'Could not push release tag.' }
-            }
+            "Validated $($assets.Count) release assets." | Set-Content -Encoding utf8 $log
 
             @"
             MARS PRO V3 Fixed Version 1 release candidate.
@@ -117,18 +94,34 @@ jobs:
             "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
 
             & gh release view $env:RELEASE_TAG *> $null
-            if ($LASTEXITCODE -eq 0) {
-              & gh release upload $env:RELEASE_TAG @assetPaths --clobber
-              if ($LASTEXITCODE -ne 0) { throw 'Could not upload release assets.' }
-              & gh release edit $env:RELEASE_TAG --title "MARS PRO V3 $env:RELEASE_TAG" --notes-file release/RELEASE_NOTES.md --prerelease
-              if ($LASTEXITCODE -ne 0) { throw 'Could not update release metadata.' }
-            } else {
-              & gh release create $env:RELEASE_TAG @assetPaths --verify-tag --title "MARS PRO V3 $env:RELEASE_TAG" --notes-file release/RELEASE_NOTES.md --prerelease
+            $releaseExists = $LASTEXITCODE -eq 0
+            if (-not $releaseExists) {
+              & gh release create $env:RELEASE_TAG --target "$env:GITHUB_SHA" --title "MARS PRO V3 $env:RELEASE_TAG" --notes-file release/RELEASE_NOTES.md --prerelease 2>&1 | Tee-Object -FilePath $log -Append
               if ($LASTEXITCODE -ne 0) { throw 'Could not create GitHub prerelease.' }
             }
-          } finally {
-            Stop-Transcript | Out-Null
+
+            foreach ($asset in $assets) {
+              "Uploading $($asset.Name) ($($asset.Length) bytes)." | Add-Content $log
+              & gh release upload $env:RELEASE_TAG "$($asset.FullName)" --clobber 2>&1 | Tee-Object -FilePath $log -Append
+              if ($LASTEXITCODE -ne 0) { throw "Could not upload $($asset.Name)." }
+            }
+            & gh release edit $env:RELEASE_TAG --title "MARS PRO V3 $env:RELEASE_TAG" --notes-file release/RELEASE_NOTES.md --prerelease 2>&1 | Tee-Object -FilePath $log -Append
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update release metadata.' }
+            'Release publication completed.' | Add-Content $log
+          } catch {
+            ($_ | Out-String) | Add-Content $log
+            throw
           }
+
+      - name: Upload verified workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MARS-PRO-V3-Fixed-Version-1-Windows-${{ github.run_number }}
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Publish release failure diagnostic
         if: failure()
