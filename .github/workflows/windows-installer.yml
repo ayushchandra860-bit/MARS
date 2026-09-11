@@ -14,12 +14,12 @@ on:
         description: Release tag when publishing
         required: true
         type: string
-        default: v3.0.1-rc.1
+        default: v3.0.1-rc.2
   push:
     branches: [main]
     tags: ['v*']
     paths:
-      - .github/release/v3.0.1-rc.1
+      - .github/release/v*
 
 permissions:
   contents: write
@@ -94,7 +94,7 @@ jobs:
       - name: Package NSIS and portable x64 apps
         shell: pwsh
         run: |
-          & npm exec electron-builder -- --win --x64 2>&1 | Tee-Object -FilePath ci-logs/electron-builder.log
+          & npm exec electron-builder -- --win --x64 --publish never 2>&1 | Tee-Object -FilePath ci-logs/electron-builder.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Generate SHA-256 checksums
@@ -171,19 +171,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
           $releaseTag = if ('${{ github.ref }}'.StartsWith('refs/tags/v')) {
             '${{ github.ref_name }}'
           } elseif ('${{ github.event_name }}' -eq 'workflow_dispatch') {
             '${{ inputs.release_tag }}'
           } else {
-            'v3.0.1-rc.1'
+            "v$($package.version)"
           }
-          $package = Get-Content package.json -Raw | ConvertFrom-Json
           if ("v$($package.version)" -ne $releaseTag) {
             throw "Package version $($package.version) does not match release tag $releaseTag."
           }
           if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref }}' -eq 'refs/heads/main') {
-            $marker = (Get-Content .github/release/v3.0.1-rc.1 -Raw).Trim()
+            $markerPath = ".github/release/$releaseTag"
+            if (-not (Test-Path $markerPath)) { throw "Release marker $markerPath is missing." }
+            $marker = (Get-Content $markerPath -Raw).Trim()
             if ($marker -ne $releaseTag) { throw 'Release marker does not match the guarded tag.' }
           }
           $files = @(Get-ChildItem -Path release -File | Where-Object {
@@ -192,10 +194,18 @@ jobs:
           if ($files.Count -lt 3) { throw 'Installer, portable app, or checksums are missing.' }
           $paths = $files | ForEach-Object { $_.FullName }
           @"
-          MARS PRO V3 Fixed Version 1 release candidate.
+          MARS PRO V3 Windows startup recovery release candidate.
 
           This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
-          It is decision-support software, not a profit guarantee. Use DEMO mode first and validate with your own risk limits.
+
+          Startup changes in rc.2:
+          - keeps startup diagnostics in the app data folder
+          - displays startup and renderer failures instead of exiting silently
+          - preserves unreadable primary and backup databases before clean recovery
+          - uses safer Windows rendering startup settings
+          - passed packaged-EXE visible-window checks with fresh and deliberately corrupted data
+
+          MARS is decision-support software, not a profit guarantee. Start in DEMO mode and use strict risk limits.
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
           gh release view $releaseTag *> $null
           if ($LASTEXITCODE -eq 0) {
