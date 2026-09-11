@@ -7,10 +7,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { CapturedFrame } from '../../../shared/types/scanner';
-import { TradingAction, TradeOutcome } from '../../../shared/types/decision';
-import { PlatformMode } from '../../../shared/types/canonical';
+import { TradeOutcome } from '../../../shared/types/decision';
 import { IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
 import { RunningTradeManager } from '../trade/RunningTradeManager';
+import { TrustedExecutionEvidenceRegistry } from '../trade/TrustedExecutionEvidence';
 import {
   isTrustedOlympTradeUrl,
   normalizeOlympTradeUrl,
@@ -138,23 +138,45 @@ export class EmbeddedBrowserManager {
 
       const click = parseBrowserTradeClickMessage(message);
       if (click) {
-        const trade = RunningTradeManager.getInstance().registerTrade({
-          sessionId: 'live-browser',
-          signalId: `browser-${click.executionId}`,
+        const manager = RunningTradeManager.getInstance();
+        const evidence = TrustedExecutionEvidenceRegistry.getInstance();
+        evidence.stage({
           executionId: click.executionId,
-          asset: click.asset,
-          direction: click.action,
-          expirySeconds: click.expirySeconds,
-          entryPrice: click.entryPrice === null ? null : String(click.entryPrice),
           eventId: click.eventId,
+          action: click.action,
+          asset: click.asset,
+          entryPrice: click.entryPrice,
+          expirySeconds: click.expirySeconds,
           platformMode: click.platformMode,
+          capturedAt: click.timestamp,
         });
-        if (trade) this.emitTradeStateRefresh();
-        // The controller may update its immediate overlay context, but durable
-        // registration above happens first and deduplication prevents a second row.
-        try { this.tradeClickHandler?.(click); } catch (error) {
-          console.error('[MARS Browser Detector] Trade-click subscriber failed:', error);
+
+        let trade = manager.findTradeByExecutionId(click.executionId);
+        if (!trade) {
+          try { this.tradeClickHandler?.(click); } catch (error) {
+            console.error('[MARS Browser Detector] Trade-click subscriber failed:', error);
+          }
+          trade = manager.findTradeByExecutionId(click.executionId);
         }
+
+        // If analysis is stopped or unavailable, retain a safe unlinked journal
+        // row rather than losing the user's real execution. The staged evidence
+        // still overrides every fallback field.
+        if (!trade) {
+          trade = manager.registerTrade({
+            sessionId: 'live-browser',
+            signalId: `browser-${click.executionId}`,
+            executionId: click.executionId,
+            asset: click.asset,
+            direction: click.action,
+            expirySeconds: click.expirySeconds,
+            entryPrice: click.entryPrice === null ? null : String(click.entryPrice),
+            eventId: click.eventId,
+            platformMode: click.platformMode,
+          });
+        }
+        evidence.discard(click.executionId);
+        if (trade) this.emitTradeStateRefresh();
         return;
       }
 
@@ -179,7 +201,6 @@ export class EmbeddedBrowserManager {
     this.tradeClickHandler = handler;
   }
 
-  /** Result correlation is owned by this manager; legacy subscribers are intentionally ignored. */
   public setTradeResultHandler(_handler: ((event: { outcome: string; amount: number; rawText: string; timestamp: number }) => void) | null): void {}
 
   private injectTradeDetectorScript(): void {

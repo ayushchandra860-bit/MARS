@@ -4,6 +4,7 @@ import path from 'path';
 import { Database } from '../electron/main/database/Database';
 import { TradeRepository } from '../electron/main/database/repositories/TradeRepository';
 import { RunningTradeManager } from '../electron/main/trade/RunningTradeManager';
+import { TrustedExecutionEvidenceRegistry } from '../electron/main/trade/TrustedExecutionEvidence';
 import { TradeOutcome, TradingAction } from '../shared/types/decision';
 import { PlatformMode } from '../shared/types/canonical';
 
@@ -12,6 +13,7 @@ describe('Browser Workstation trade registration', () => {
   let dbPath: string;
   let repository: TradeRepository;
   let manager: RunningTradeManager;
+  const evidence = TrustedExecutionEvidenceRegistry.getInstance();
 
   beforeEach(async () => {
     dbPath = path.join(__dirname, `browser-trade-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
@@ -21,9 +23,11 @@ describe('Browser Workstation trade registration', () => {
     manager = RunningTradeManager.getInstance();
     manager.clearAll();
     manager.setRepository(repository);
+    evidence.clear();
   });
 
   afterEach(() => {
+    evidence.clear();
     manager.clearAll();
     db.close();
     for (const candidate of [dbPath, `${dbPath}.bak`]) {
@@ -98,5 +102,48 @@ describe('Browser Workstation trade registration', () => {
     expect(trade?.platformMode).toBe(PlatformMode.DEMO);
     expect(db.prepare('SELECT platform_mode FROM tracked_trades WHERE id = ?').get(trade!.id))
       .toEqual({ platform_mode: 'DEMO' });
+  });
+
+  it('overrides placeholder registration fields with one-time trusted browser evidence', () => {
+    evidence.stage({
+      executionId: 'trusted-exec', eventId: 'trusted-click', action: TradingAction.BUY,
+      asset: 'EUR/USD', entryPrice: 1.0942, expirySeconds: 45,
+      platformMode: PlatformMode.LIVE, capturedAt: Date.now(),
+    });
+    const trade = manager.registerTrade({
+      sessionId: 'live-browser', signalId: 'unsafe-signal', executionId: 'trusted-exec',
+      eventId: 'trusted-click', asset: 'OTC ASSET', direction: TradingAction.SELL,
+      entryPrice: '1.0', expirySeconds: 60, platformMode: PlatformMode.UNKNOWN,
+      confidence: 0.99, reasons: ['untrusted context'], mlFeatures: new Array(11).fill(1),
+    });
+
+    expect(trade).toMatchObject({
+      signalId: 'browser-trusted-exec', executionId: 'trusted-exec', asset: 'EUR/USD',
+      direction: TradingAction.BUY, entryPrice: '1.0942', expirySeconds: 45,
+      platformMode: PlatformMode.LIVE, confidence: null,
+    });
+    expect(trade?.mlFeatures).toBeUndefined();
+  });
+
+  it('preserves a matching live signal while trusted execution owns broker facts', () => {
+    evidence.stage({
+      executionId: 'linked-exec', eventId: 'linked-click', action: TradingAction.SELL,
+      asset: 'GBP/USD', entryPrice: 1.2745, expirySeconds: 120,
+      platformMode: PlatformMode.LIVE, capturedAt: Date.now(),
+    });
+    const features = new Array(11).fill(0.25);
+    const trade = manager.registerTrade({
+      sessionId: 'analysis-session', signalId: 'signal-live-1', executionId: 'linked-exec',
+      eventId: 'linked-click', asset: 'GBP/USD', direction: TradingAction.SELL,
+      entryPrice: '9', expirySeconds: 60, platformMode: PlatformMode.UNKNOWN,
+      confidence: 0.72, reasons: ['matched signal'], mlFeatures: features,
+    });
+
+    expect(trade).toMatchObject({
+      signalId: 'signal-live-1', asset: 'GBP/USD', direction: TradingAction.SELL,
+      entryPrice: '1.2745', expirySeconds: 120, platformMode: PlatformMode.LIVE,
+      confidence: 0.72,
+    });
+    expect(trade?.mlFeatures).toEqual(features);
   });
 });

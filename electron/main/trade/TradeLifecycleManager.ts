@@ -11,6 +11,7 @@ import {
   TradeOutcome,
 } from '../../../shared/types/decision';
 import { CanonicalConfidence, PlatformMode } from '../../../shared/types/canonical';
+import { TrustedExecutionEvidenceRegistry } from './TrustedExecutionEvidence';
 
 export class TradeLifecycleManager {
   private static instance: TradeLifecycleManager | null = null;
@@ -92,6 +93,10 @@ export class TradeLifecycleManager {
     }
   }
 
+  private assetKey(value: string | null | undefined): string {
+    return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  }
+
   public registerTrade(params: {
     sessionId: string;
     signalId?: string;
@@ -108,22 +113,37 @@ export class TradeLifecycleManager {
     eventId?: string;
     platformMode?: PlatformMode;
   }): AuthoritativeTradeRecord | null {
-    if (params.direction === TradingAction.WAIT) return null;
+    const requestedExecutionId = params.executionId?.trim() || params.eventId?.trim() || undefined;
+    const trusted = requestedExecutionId
+      ? TrustedExecutionEvidenceRegistry.getInstance().consume(requestedExecutionId)
+      : null;
+    const direction = trusted?.action ?? params.direction;
+    if (direction === TradingAction.WAIT) return null;
 
     const now = Date.now();
     this.pruneDeduplicationState(now);
-    const assetKey = params.asset?.trim().toUpperCase() || 'UNKNOWN';
-    const executionId = params.executionId?.trim() || params.eventId?.trim() || undefined;
+    const executionId = trusted?.executionId ?? requestedExecutionId;
+    const eventId = trusted?.eventId ?? params.eventId;
+    const asset = trusted ? trusted.asset : params.asset;
+    const contextMatchesEvidence = !trusted || Boolean(
+      trusted.asset
+      && this.assetKey(trusted.asset) === this.assetKey(params.asset)
+      && trusted.action === params.direction
+    );
+    const signalId = contextMatchesEvidence
+      ? params.signalId
+      : executionId ? `browser-${executionId}` : undefined;
+    const assetKey = this.assetKey(asset) || 'UNKNOWN';
 
-    if (params.eventId) {
-      if (this.recentEventIds.has(params.eventId)) {
+    if (eventId) {
+      if (this.recentEventIds.has(eventId)) {
         return executionId ? this.findTradeByExecutionId(executionId) ?? null : null;
       }
-      this.recentEventIds.add(params.eventId);
+      this.recentEventIds.add(eventId);
     }
 
-    if (params.signalId) {
-      const existing = this.findTradeBySignal(params.signalId);
+    if (signalId) {
+      const existing = this.findTradeBySignal(signalId);
       if (existing) return existing;
     }
 
@@ -132,39 +152,43 @@ export class TradeLifecycleManager {
       if (existingByExecution) return existingByExecution;
     }
 
-    const lockoutKey = params.eventId
-      ? `event:${params.eventId}`
-      : `${assetKey}:${params.direction}:${params.signalId || 'anon'}`;
+    const lockoutKey = eventId
+      ? `event:${eventId}`
+      : `${assetKey}:${direction}:${signalId || 'anon'}`;
     const lastLockout = this.recentLockouts.get(lockoutKey) || 0;
     if (now - lastLockout < this.DUPLICATE_LOCKOUT_MS) return null;
     this.recentLockouts.set(lockoutKey, now);
 
     const seq = ++this.seqCounter;
-    const signalPart = params.signalId ? params.signalId.slice(0, 8) : 'manual';
+    const signalPart = signalId ? signalId.slice(0, 8) : 'manual';
     const tradeId = `trade-${params.sessionId.slice(0, 8)}-${signalPart}-${now}-${seq}`;
-    const expirySec = params.expirySeconds && params.expirySeconds > 0 ? params.expirySeconds : 60;
+    const requestedExpiry = trusted?.expirySeconds ?? params.expirySeconds;
+    const expirySec = requestedExpiry && requestedExpiry > 0 ? requestedExpiry : 60;
+    const entryPrice = trusted
+      ? trusted.entryPrice === null ? null : String(trusted.entryPrice)
+      : params.entryPrice ?? null;
 
     const initialRecord: AuthoritativeTradeRecord = {
       id: tradeId,
       sessionId: params.sessionId,
-      signalId: params.signalId,
+      signalId,
       executionId,
-      asset: params.asset,
-      direction: params.direction,
+      asset,
+      direction,
       entryTimestamp: now,
       expirySeconds: expirySec,
       expiryTimestamp: now + expirySec * 1000,
       status: TradeState.WAITING,
       runningTimeSec: 0,
       result: null,
-      confidence: params.confidence ?? null,
-      entryPrice: params.entryPrice ?? null,
+      confidence: contextMatchesEvidence ? params.confidence ?? null : null,
+      entryPrice,
       expiryLabel: `${Math.round(expirySec / 60)} min`,
-      reasons: params.reasons ? [...params.reasons] : [],
-      timeframe: params.timeframe ?? null,
-      regime: params.regime ?? null,
-      platformMode: params.platformMode ?? PlatformMode.UNKNOWN,
-      mlFeatures: params.mlFeatures ? [...params.mlFeatures] : undefined,
+      reasons: contextMatchesEvidence && params.reasons ? [...params.reasons] : [],
+      timeframe: contextMatchesEvidence ? params.timeframe ?? null : null,
+      regime: contextMatchesEvidence ? params.regime ?? null : null,
+      platformMode: trusted?.platformMode ?? params.platformMode ?? PlatformMode.UNKNOWN,
+      mlFeatures: contextMatchesEvidence && params.mlFeatures ? [...params.mlFeatures] : undefined,
     };
 
     const entryDetected = this.applyStateTransition(initialRecord, TradeState.ENTRY_DETECTED);
@@ -261,7 +285,6 @@ export class TradeLifecycleManager {
     return this.tradeRepo?.completeTrade(tradeId, outcome, completionPrice ?? null) ?? false;
   }
 
-  /** Resolve only a single active record carrying the exact durable execution ID. */
   public resolveTradeByExecutionId(
     executionId: string,
     outcome: TradeOutcome,
@@ -292,10 +315,6 @@ export class TradeLifecycleManager {
     return this.resolveTradeOutcome(durableMatches[0].id, outcome, completionPrice ?? null);
   }
 
-  /**
-   * Timing-only result correlation is permitted only when exactly one eligible
-   * trade exists. Multiple candidates are deliberately left unresolved.
-   */
   public resolveNextActiveTrade(
     outcome: TradeOutcome,
     completionPrice?: string | null,
