@@ -93,7 +93,9 @@ jobs:
             if ($exitedBeforeCleanup -or -not $visible) { throw "$label startup did not produce a visible window." }
           }
 
-          $userData = Join-Path $env:APPDATA 'MARS PRO V3'
+          # Electron derives this path from package name (mars-pro), not productName.
+          $userData = Join-Path $env:APPDATA 'mars-pro'
+          "User data path under test: $userData" | Add-Content $summary
           Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue
           Start-MarsVisible 'fresh'
 
