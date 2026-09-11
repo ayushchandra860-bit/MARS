@@ -1,6 +1,6 @@
 // ============================================================
 // MARS PRO V3 — Read-only Overlay Preload
-// Overlay renderers receive state only; they cannot invoke privileged handlers.
+// Overlay renderers receive display state only; no privileged invokes.
 // ============================================================
 
 import { contextBridge, ipcRenderer } from 'electron';
@@ -10,7 +10,6 @@ const ALLOWED_LISTEN_CHANNELS = new Set<string>([
   IPC_CHANNELS.OVERLAY_STATE_UPDATE,
   IPC_CHANNELS.OVERLAY_SHOW,
   IPC_CHANNELS.OVERLAY_HIDE,
-  IPC_CHANNELS.DEVELOPER_DIAGNOSTICS,
 ]);
 
 const on = (channel: string, callback: (...args: unknown[]) => void): (() => void) => {
@@ -30,5 +29,4 @@ contextBridge.exposeInMainWorld('marsApi', {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   onSignalUpdate: (callback: (data: unknown) => void) => on(IPC_CHANNELS.OVERLAY_STATE_UPDATE, callback),
-  onDeveloperDiagnostics: (callback: (data: unknown) => void) => on(IPC_CHANNELS.DEVELOPER_DIAGNOSTICS, callback),
 });
