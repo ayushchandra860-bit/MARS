@@ -1,0 +1,115 @@
+name: Windows Startup Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/diagnostics/windows-startup
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  startup-diagnostic:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build unpacked Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          & npm ci 2>&1 | Tee-Object ci-logs/npm-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & npm run build 2>&1 | Tee-Object ci-logs/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & npm exec electron-builder -- --win --x64 --dir --publish never 2>&1 | Tee-Object ci-logs/package.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Inspect package and launch visible window
+        shell: pwsh
+        run: |
+          $summary = 'ci-logs/startup-summary.txt'
+          $archive = 'release/win-unpacked/resources/app.asar'
+          $exe = 'release/win-unpacked/MARS PRO V3.exe'
+          "Archive exists: $(Test-Path $archive)" | Set-Content $summary
+          "Executable exists: $(Test-Path $exe)" | Add-Content $summary
+          & node -e "const a=require('@electron/asar'); for(const f of a.listPackage(process.argv[1])) console.log(f)" $archive 2>&1 | Set-Content ci-logs/asar-files.log
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect app.asar.' }
+          $asarText = Get-Content ci-logs/asar-files.log -Raw
+          "Has sql.js JS: $($asarText.Contains('node_modules/sql.js/dist/sql-wasm.js'))" | Add-Content $summary
+          "Has sql.js WASM: $($asarText.Contains('node_modules/sql.js/dist/sql-wasm.wasm'))" | Add-Content $summary
+          "Has renderer: $($asarText.Contains('dist/index.html'))" | Add-Content $summary
+          "Has main entry: $($asarText.Contains('dist-electron/main/main.js'))" | Add-Content $summary
+
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class MarsWindowProbe {
+            [DllImport("user32.dll")]
+            public static extern bool IsWindowVisible(IntPtr hWnd);
+          }
+          '@
+          $stdout = Join-Path $PWD 'ci-logs/app-stdout.log'
+          $stderr = Join-Path $PWD 'ci-logs/app-stderr.log'
+          $env:ELECTRON_ENABLE_LOGGING = '1'
+          $process = Start-Process -FilePath $exe -ArgumentList '--enable-logging','--v=1' -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $visible = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 500
+            $process.Refresh()
+            if ($process.HasExited) { break }
+            $candidates = @(Get-Process -Name 'MARS PRO V3' -ErrorAction SilentlyContinue)
+            foreach ($candidate in $candidates) {
+              if ($candidate.MainWindowHandle -ne 0 -and [MarsWindowProbe]::IsWindowVisible($candidate.MainWindowHandle)) {
+                $visible = $true
+                break
+              }
+            }
+            if ($visible) { break }
+          }
+          $process.Refresh()
+          "Primary process exited: $($process.HasExited)" | Add-Content $summary
+          if ($process.HasExited) { "Exit code: $($process.ExitCode)" | Add-Content $summary }
+          "Visible main window within 20s: $visible" | Add-Content $summary
+          Get-Content $summary
+          if (-not $process.HasExited) { & taskkill /PID $process.Id /T /F 2>&1 | Out-Null }
+          if ($process.HasExited -or -not $visible) { throw 'Packaged app did not remain open with a visible window.' }
+
+      - name: Publish startup diagnostic
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const title = 'MARS Windows startup diagnostic';
+            const dir = path.join(process.env.GITHUB_WORKSPACE, 'ci-logs');
+            const names = fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => n.endsWith('.log') || n.endsWith('.txt')).sort() : [];
+            const sections = names.map(name => {
+              const text = fs.readFileSync(path.join(dir, name), 'utf8').replace(/\x1b\[[0-9;]*m/g, '');
+              return `#### ${name}\n\n\`\`\`text\n${text.split(/\r?\n/).slice(-100).join('\n').slice(-10000)}\n\`\`\``;
+            });
+            const body = `Commit: \`${context.sha}\`\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n${sections.join('\n\n').slice(-55000)}`;
+            const { data: issues } = await github.rest.issues.listForRepo({ owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (existing) await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body });
+            else await github.rest.issues.create({ owner: context.repo.owner, repo: context.repo.repo, title, body });
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MARS-Windows-startup-diagnostic-${{ github.run_number }}
+          path: ci-logs/*
+          retention-days: 7
