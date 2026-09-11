@@ -1,8 +1,7 @@
 // ============================================================
 // MARS PRO V3 — Action-aware, quality-gated lightweight ML engine
 // Probability always means P(the explicitly supplied BUY/SELL action wins).
-// DORMANT models never influence output. TRAINING/READY models are blended
-// only after a useful walk-forward holdout passes the quality gate.
+// READY means the current classifier passed a two-class holdout gate.
 // ============================================================
 
 import fs from 'fs';
@@ -108,9 +107,7 @@ interface AssetModel {
 }
 
 export interface WinProbabilityResult {
-  /** Ratio in the inclusive 0..1 scale. */
   probability: number;
-  /** Ratio added by downstream confidence logic; also in 0..1 scale. */
   confidenceBoost: number;
   keyFactors: string[];
   readiness: ReadinessState;
@@ -162,7 +159,7 @@ export class MLEngine {
     return model;
   }
 
-  private readinessFor(sampleCount: number): ReadinessState {
+  private sampleReadinessFor(sampleCount: number): ReadinessState {
     if (sampleCount < MIN_SAMPLES) return 'DORMANT';
     if (sampleCount < READY_SAMPLES) return 'TRAINING';
     return 'READY';
@@ -172,13 +169,33 @@ export class MLEngine {
     return this.ingestionQueue.length;
   }
 
+  private passesValidation(model: AssetModel, sampleReadiness: ReadinessState): boolean {
+    if (sampleReadiness === 'DORMANT' || !model.classifier || !model.validation) return false;
+    if (model.validation.validationSize < MIN_VALIDATION_SIZE || model.validation.trainSize < 20) return false;
+    if (model.validation.winRecall <= 0 || model.validation.lossRecall <= 0) return false;
+    const threshold = sampleReadiness === 'READY'
+      ? MIN_READY_BALANCED_ACCURACY
+      : MIN_TRAINING_BALANCED_ACCURACY;
+    return model.validation.balancedAccuracy >= threshold;
+  }
+
+  private operationalReadiness(model: AssetModel | undefined): ReadinessState {
+    if (!model) return 'DORMANT';
+    const sampleReadiness = this.sampleReadinessFor(model.buffer.length);
+    if (sampleReadiness === 'DORMANT') return 'DORMANT';
+    if (sampleReadiness === 'READY' && this.passesValidation(model, sampleReadiness)) return 'READY';
+    return 'TRAINING';
+  }
+
   public getReadiness(asset?: string | null): ReadinessState {
-    if (asset) return this.readinessFor(this.models.get(this.keyFor(asset))?.buffer.length || 0);
-    let strongestAssetCount = this.models.get('')?.buffer.length || 0;
-    for (const [key, model] of this.models) {
-      if (key) strongestAssetCount = Math.max(strongestAssetCount, model.buffer.length);
+    if (asset) return this.operationalReadiness(this.models.get(this.keyFor(asset)));
+    let strongest: ReadinessState = 'DORMANT';
+    for (const model of this.models.values()) {
+      const readiness = this.operationalReadiness(model);
+      if (readiness === 'READY') return 'READY';
+      if (readiness === 'TRAINING') strongest = 'TRAINING';
     }
-    return this.readinessFor(strongestAssetCount);
+    return strongest;
   }
 
   public getSampleCount(asset?: string | null): number {
@@ -186,8 +203,13 @@ export class MLEngine {
   }
 
   public hasTrainedModel(asset?: string | null): boolean {
-    if (asset) return Boolean(this.models.get(this.keyFor(asset))?.classifier);
-    return Array.from(this.models.values()).some((model) => Boolean(model.classifier));
+    if (asset) {
+      const model = this.models.get(this.keyFor(asset));
+      return Boolean(model && this.passesValidation(model, this.sampleReadinessFor(model.buffer.length)));
+    }
+    return Array.from(this.models.values()).some(
+      (model) => this.passesValidation(model, this.sampleReadinessFor(model.buffer.length)),
+    );
   }
 
   public save(): void {
@@ -223,7 +245,6 @@ export class MLEngine {
       const stats = fs.statSync(this.persistencePath);
       if (!stats.isFile() || stats.size <= 0 || stats.size > 10 * 1024 * 1024) throw new Error('Model file size is invalid.');
       const data = JSON.parse(fs.readFileSync(this.persistencePath, 'utf8'));
-      // Version 1 lacked action provenance; it is deliberately not trusted.
       if (!data || data.version !== 2 || !data.models || typeof data.models !== 'object') return;
       this.models.clear();
       this.ingestionQueue = [];
@@ -389,13 +410,6 @@ export class MLEngine {
     return global && global.buffer.length > 0 ? { key: '', model: global } : null;
   }
 
-  private passesValidation(model: AssetModel, readiness: ReadinessState): boolean {
-    if (readiness === 'DORMANT' || !model.classifier || !model.validation) return false;
-    if (model.validation.validationSize < MIN_VALIDATION_SIZE || model.validation.trainSize < 20) return false;
-    const threshold = readiness === 'READY' ? MIN_READY_BALANCED_ACCURACY : MIN_TRAINING_BALANCED_ACCURACY;
-    return model.validation.balancedAccuracy >= threshold;
-  }
-
   public extractFeatures(observation: MarketObservation, candleBuffer?: OHLC[]): number[] {
     const rsi = observation.quantitativeMetrics?.rsi?.value ?? 50;
     const oversold = observation.quantitativeMetrics?.rsi?.isOversold ?? false;
@@ -433,7 +447,16 @@ export class MLEngine {
   ): WinProbabilityResult {
     const keyFactors: string[] = [];
     const selected = this.selectModel(observation.asset);
-    const readiness = selected ? this.readinessFor(selected.model.buffer.length) : this.getReadiness(observation.asset);
+    const sampleReadiness = selected
+      ? this.sampleReadinessFor(selected.model.buffer.length)
+      : 'DORMANT';
+    const validationPassed = selected
+      ? this.passesValidation(selected.model, sampleReadiness)
+      : false;
+    const readiness: ReadinessState = selected
+      ? sampleReadiness === 'READY' && validationPassed ? 'READY'
+        : sampleReadiness === 'DORMANT' ? 'DORMANT' : 'TRAINING'
+      : this.getReadiness(observation.asset);
     const sampleSize = selected?.model.buffer.length || 0;
 
     if (action !== TradingAction.BUY && action !== TradingAction.SELL) {
@@ -491,7 +514,6 @@ export class MLEngine {
     }
     probability = Math.max(0.10, Math.min(0.90, probability));
 
-    const validationPassed = selected ? this.passesValidation(selected.model, readiness) : false;
     let modelApplied = false;
     let learnedProbability = 0.5;
     if (selected?.model.classifier && validationPassed) {
@@ -504,7 +526,7 @@ export class MLEngine {
     } else if (readiness === 'DORMANT') {
       keyFactors.push('ML dormant: no model influence');
     } else if (selected) {
-      keyFactors.push('ML holdout quality gate not met: heuristic only');
+      keyFactors.push('ML training: holdout quality gate not met');
     }
 
     probability = Math.round(Math.max(0.10, Math.min(0.90, probability)) * 1000) / 1000;

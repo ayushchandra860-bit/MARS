@@ -43,6 +43,7 @@ describe('ML Engine action probability policy', () => {
     const after = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
     expect(after.readiness).toBe('DORMANT');
     expect(after.modelApplied).toBe(false);
+    expect(ml.hasTrainedModel()).toBe(false);
     expect(after.probability).toBe(baseline);
   });
 
@@ -63,6 +64,7 @@ describe('ML Engine action probability policy', () => {
     for (let i = 0; i < 80; i++) ml.ingestLabeledExamples([{ ...buyWin, asset: 'EUR/USD' }, { ...buyLoss, asset: 'EUR/USD' }]);
     const result = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
     expect(ml.getReadiness('EUR/USD')).toBe('READY');
+    expect(ml.hasTrainedModel('EUR/USD')).toBe(true);
     expect(result.validationPassed).toBe(true);
     expect(result.modelApplied).toBe(true);
     expect(result.sampleSize).toBe(160);
@@ -87,7 +89,7 @@ describe('ML Engine action probability policy', () => {
     expect(buy.probability).toBeGreaterThan(sell.probability);
   });
 
-  it('blocks a contradictory model at the holdout quality gate', () => {
+  it('keeps a contradictory high-sample model in TRAINING with no influence', () => {
     const ml = MLEngine.getInstance();
     const same = new Array(FEATURE_NAMES.length).fill(0.5);
     for (let i = 0; i < 80; i++) {
@@ -97,10 +99,11 @@ describe('ML Engine action probability policy', () => {
       ]);
     }
     const result = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
-    expect(result.readiness).toBe('READY');
+    expect(result.readiness).toBe('TRAINING');
     expect(result.validationPassed).toBe(false);
     expect(result.modelApplied).toBe(false);
     expect(result.confidenceBoost).toBe(0);
+    expect(ml.hasTrainedModel('EUR/USD')).toBe(false);
   });
 
   it('rejects examples without action provenance', () => {
