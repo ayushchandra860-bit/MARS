@@ -4,9 +4,22 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the verified build as a GitHub prerelease
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Release tag when publishing
+        required: true
+        type: string
+        default: v3.0.1-rc.1
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - .github/release/v3.0.1-rc.1
 
 permissions:
   contents: write
@@ -28,29 +41,12 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
-          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
-      - name: Apply one-time controller repair
-        if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
-        shell: pwsh
-        run: |
-          & node scripts/repair-controller.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add electron/main/lifecycle/AnalysisController.ts
-          git commit -m 'fix: apply verified expiry guard to green controller'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install locked dependencies
         shell: pwsh
@@ -104,7 +100,7 @@ jobs:
       - name: Generate SHA-256 checksums
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path release -Filter *.exe
+          $files = @(Get-ChildItem -Path release -Filter *.exe -File)
           if ($files.Count -eq 0) { throw 'No Windows executables were produced.' }
           $lines = $files | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
@@ -140,19 +136,11 @@ jobs:
             });
             const existing = comments.find((comment) => comment.user?.type === 'Bot' && comment.body?.includes(marker));
             if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body });
             } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body,
-              });
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issueNumber, body });
             }
 
       - name: Upload CI diagnostics
@@ -174,13 +162,45 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish tagged GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish guarded GitHub prerelease
+        if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $files = Get-ChildItem -Path release -Include *.exe,SHA256SUMS.txt -File
-          if ($files.Count -eq 0) { throw 'No release files were produced.' }
+          $releaseTag = if ('${{ github.ref }}'.StartsWith('refs/tags/v')) {
+            '${{ github.ref_name }}'
+          } elseif ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            '${{ inputs.release_tag }}'
+          } else {
+            'v3.0.1-rc.1'
+          }
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ("v$($package.version)" -ne $releaseTag) {
+            throw "Package version $($package.version) does not match release tag $releaseTag."
+          }
+          if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref }}' -eq 'refs/heads/main') {
+            $marker = (Get-Content .github/release/v3.0.1-rc.1 -Raw).Trim()
+            if ($marker -ne $releaseTag) { throw 'Release marker does not match the guarded tag.' }
+          }
+          $files = @(Get-ChildItem -Path release -File | Where-Object {
+            $_.Extension -eq '.exe' -or $_.Name -eq 'SHA256SUMS.txt'
+          })
+          if ($files.Count -lt 3) { throw 'Installer, portable app, or checksums are missing.' }
           $paths = $files | ForEach-Object { $_.FullName }
-          gh release create "${{ github.ref_name }}" @paths --title "MARS PRO V3 ${{ github.ref_name }}" --generate-notes
+          @"
+          MARS PRO V3 Fixed Version 1 release candidate.
+
+          This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
+          It is decision-support software, not a profit guarantee. Use DEMO mode first and validate with your own risk limits.
+          "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
+          gh release view $releaseTag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $releaseTag @paths --clobber
+            gh release edit $releaseTag --title "MARS PRO V3 $releaseTag" --notes-file release/RELEASE_NOTES.md --prerelease
+          } else {
+            gh release create $releaseTag @paths --target "$env:GITHUB_SHA" --title "MARS PRO V3 $releaseTag" --notes-file release/RELEASE_NOTES.md --prerelease
+          }

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 concurrency:
@@ -16,87 +16,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  repair-controller:
-    name: Restore green controller safely
-    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
-      - name: Restore and patch controller
-        shell: bash
-        run: |
-          set -euo pipefail
-          git show ba8c2b0bd6de5056a32ce808b3a4af1df501a142:electron/main/lifecycle/AnalysisController.ts > electron/main/lifecycle/AnalysisController.ts
-          python3 <<'PY'
-          from pathlib import Path
-          path = Path('electron/main/lifecycle/AnalysisController.ts')
-          source = path.read_text(encoding='utf-8')
-          source = source.replace("import { OutcomeEvaluator } from '../brain/OutcomeEvaluator';\n", '')
-          source = source.replace("import { EmbeddedBrowserManager } from '../view/EmbeddedBrowserManager';\n", "import { EmbeddedBrowserManager } from '../view/EmbeddedBrowserManager';\nimport { deriveVerifiedPriceOutcome } from '../trade/verifiedTradeOutcome';\n")
-          source = source.replace('RiskLevel, TradeOutcome, SignalStatusLabel', 'RiskLevel, SignalStatusLabel')
-          source = source.replace('  private outcomeEvaluator: OutcomeEvaluator;\n', '')
-          source = source.replace('    this.outcomeEvaluator = new OutcomeEvaluator();\n', '')
-          start = source.index('    EmbeddedBrowserManager.getInstance().setTradeResultHandler')
-          end = source.index('\n\n    if (database)', start)
-          source = source[:start] + source[end:]
-          start = source.index('  private updateTradeLifecycle(observation: any): void {')
-          end = source.index('\n  private createTrackedTrade(', start)
-          method = '''  private updateTradeLifecycle(observation: any): void {
-            const manager = TradeLifecycleManager.getInstance();
-            const activeTrades = manager.getActiveTrades();
-            if (activeTrades.length === 0) return;
-
-            const now = Date.now();
-            let anyResolved = false;
-            for (const trade of activeTrades) {
-              if (trade.expiryTimestamp > now) continue;
-              manager.handleTradeExpiry(trade.id);
-              const verified = deriveVerifiedPriceOutcome(trade, observation);
-              if (!verified) continue;
-              if (manager.resolveTradeOutcome(trade.id, verified.outcome, verified.completionPrice)) {
-                anyResolved = true;
-              }
-            }
-            if (anyResolved) this.emitPerformanceRefresh();
-          }
-'''
-          source = source[:start] + method + source[end:]
-          start = source.index('  private handleDetectedTradeClick(')
-          tail = source[start:]
-          tail = tail.replace("    if (!this.isValidAssetName(asset)) {\n      asset = 'OTC ASSET';\n    }", "    if (!this.isValidAssetName(asset)) {\n      asset = null;\n    }", 1)
-          tail = tail.replace("    if (!entryPrice) {\n      entryPrice = 1.0;\n    }\n", '', 1)
-          tail = tail.replace('    TradeLifecycleManager.getInstance().registerTrade({\n', '    const registeredTrade = TradeLifecycleManager.getInstance().registerTrade({\n', 1)
-          tail = tail.replace('      eventId: event.eventId,\n      direction: event.action,', "      eventId: event.eventId,\n      executionId: typeof (event as any).executionId === 'string' ? (event as any).executionId : undefined,\n      platformMode: (event as any).platformMode,\n      direction: event.action,", 1)
-          tail = tail.replace('      entryPrice: entryPrice.toString(),', '      entryPrice: entryPrice ? entryPrice.toString() : null,', 1)
-          tail = tail.replace('    });\n\n    this.lastTradeStatusState =', "    });\n\n    if (!registeredTrade) return;\n    const confirmedSignalId = registeredTrade.signalId || `trade-${registeredTrade.id}`;\n\n    this.lastTradeStatusState =", 1)
-          tail = tail.replace('      const remaining = expirySeconds;', '      const remaining = registeredTrade.expirySeconds;', 1)
-          tail = tail.replace('          signalId,', '          signalId: confirmedSignalId,', 1)
-          tail = tail.replace('          originalAction: event.action,', '          originalAction: registeredTrade.direction,', 1)
-          tail = tail.replace('          originalConfidence: activeSignalMatches ? (this.activeSignal!.originalConfidence ?? 0) : 0,', '          originalConfidence: registeredTrade.confidence ?? 0,', 1)
-          tail = tail.replace('          entryTimestamp: Date.now(),', '          entryTimestamp: registeredTrade.entryTimestamp,', 1)
-          tail = tail.replace('          recommendedExpiry: expiryLabel,', '          recommendedExpiry: registeredTrade.expiryLabel || expiryLabel,', 1)
-          tail = tail.replace("          reason: activeSignalMatches ? (this.activeSignal!.originalReasons[0] || 'Signal execution') : 'Manual trade entry',", "          reason: registeredTrade.reasons?.[0] || 'Verified trade execution',", 1)
-          source = source[:start] + tail
-          required = ['deriveVerifiedPriceOutcome(trade, observation)', 'executionId: typeof (event as any).executionId', 'if (!registeredTrade) return;', 'asset = null;', 'entryPrice: entryPrice ? entryPrice.toString() : null']
-          missing = [item for item in required if item not in source]
-          if missing:
-              raise SystemExit(f'Missing required repairs: {missing}')
-          forbidden = ["asset = 'OTC ASSET'", 'entryPrice = 1.0', "TradeOutcome.UNRESOLVED,\n            '0'"]
-          present = [item for item in forbidden if item in source]
-          if present:
-              raise SystemExit(f'Unsafe fallback survived: {present}')
-          path.write_text(source, encoding='utf-8')
-          PY
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add electron/main/lifecycle/AnalysisController.ts
-          git commit -m 'fix: apply verified expiry guard to green controller'
-          git push origin HEAD:audit/p0-foundation
-
   ipc-contract:
     name: IPC contract audit
     runs-on: ubuntu-latest
@@ -122,6 +41,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Run Vitest
+        id: vitest
         shell: bash
         run: |
           set +e
