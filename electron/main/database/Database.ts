@@ -126,6 +126,18 @@ export class Database {
     }
   }
 
+  private flushFileToDisk(filePath: string): void {
+    // Windows requires a writable handle for FlushFileBuffers/fsync. Opening
+    // the just-written snapshot with "r" causes EPERM on GitHub-hosted and
+    // normal Windows machines even though the same operation works on POSIX.
+    const descriptor = fs.openSync(filePath, process.platform === 'win32' ? 'r+' : 'r');
+    try {
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+
   private atomicReplace(buffer: Buffer): void {
     const tempPath = `${this.dbPath}.tmp-${process.pid}`;
     const stalePath = `${this.dbPath}.replace-${process.pid}`;
@@ -135,13 +147,11 @@ export class Database {
     try {
       if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
       fs.writeFileSync(tempPath, buffer);
-      const tempFd = fs.openSync(tempPath, 'r');
-      try { fs.fsyncSync(tempFd); } finally { fs.closeSync(tempFd); }
+      this.flushFileToDisk(tempPath);
 
       if (fs.existsSync(this.dbPath) && !this.skipBackupOnNextSave) {
         fs.copyFileSync(this.dbPath, backupPath);
-        const backupFd = fs.openSync(backupPath, 'r');
-        try { fs.fsyncSync(backupFd); } finally { fs.closeSync(backupFd); }
+        this.flushFileToDisk(backupPath);
       }
 
       try {
