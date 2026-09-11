@@ -34,10 +34,53 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies
-        run: npm ci
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          & npm ci 2>&1 | Tee-Object -FilePath ci-logs/npm-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Test, typecheck, build, and package
-        run: npm run package
+      - name: Clean generated output
+        shell: pwsh
+        run: |
+          & npm run clean:build 2>&1 | Tee-Object -FilePath ci-logs/clean.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit IPC contracts
+        shell: pwsh
+        run: |
+          & npm run verify:ipc 2>&1 | Tee-Object -FilePath ci-logs/ipc-audit.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Typecheck Electron and frontend
+        shell: pwsh
+        run: |
+          & npm run typecheck 2>&1 | Tee-Object -FilePath ci-logs/typecheck.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run Vitest suite on Windows
+        shell: pwsh
+        run: |
+          & npm run test 2>&1 | Tee-Object -FilePath ci-logs/vitest.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build production bundles
+        shell: pwsh
+        run: |
+          & npm run build 2>&1 | Tee-Object -FilePath ci-logs/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify production bundle structure
+        shell: pwsh
+        run: |
+          & npm run verify:build 2>&1 | Tee-Object -FilePath ci-logs/build-verification.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package NSIS and portable x64 apps
+        shell: pwsh
+        run: |
+          & npm exec electron-builder -- --win --x64 2>&1 | Tee-Object -FilePath ci-logs/electron-builder.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Generate SHA-256 checksums
         shell: pwsh
@@ -50,6 +93,15 @@ jobs:
           }
           $lines | Set-Content -Encoding utf8 release/SHA256SUMS.txt
           Get-ChildItem release
+
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MARS-Windows-CI-logs-${{ github.run_number }}
+          path: ci-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload downloadable Windows app
         uses: actions/upload-artifact@v4

@@ -56,7 +56,7 @@ describe('verified self-learning dataset', () => {
   });
 
   it('reports missing ML features honestly instead of treating defaults as complete', () => {
-    const complete = register('complete')!; const incomplete = register('incomplete', PlatformMode.LIVE, undefined)!;
+    const complete = register('complete')!; const incomplete = register('incomplete', PlatformMode.LIVE, [])!;
     manager.resolveTradeOutcome(complete.id, TradeOutcome.WIN, '1.0870');
     manager.resolveTradeOutcome(incomplete.id, TradeOutcome.LOSS, '1.0830');
     const score = dataset.getModelReadinessScore();
