@@ -102,14 +102,16 @@ describe('RUNTIME: Evidence Engine symmetry', () => {
 
 describe('RUNTIME: ML readiness and provenance', () => {
   beforeEach(() => MLEngine.getInstance().reset());
-  it('transitions DORMANT → TRAINING → READY using action-labeled samples', () => {
+  it('transitions DORMANT → TRAINING → READY only with separable holdout evidence', () => {
     const ml = MLEngine.getInstance();
-    const example = { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 1 as const, action: TradingAction.BUY };
+    const win = { features: new Array(FEATURE_NAMES.length).fill(0.2), label: 1 as const, action: TradingAction.BUY };
+    const loss = { features: new Array(FEATURE_NAMES.length).fill(0.8), label: -1 as const, action: TradingAction.BUY };
     expect(ml.getReadiness()).toBe('DORMANT');
-    for (let index = 0; index < 50; index++) ml.ingestLabeledExamples([example]);
+    for (let index = 0; index < 25; index++) ml.ingestLabeledExamples([win, loss]);
     expect(ml.getReadiness()).toBe('TRAINING');
-    for (let index = 0; index < 60; index++) ml.ingestLabeledExamples([example]);
+    for (let index = 0; index < 30; index++) ml.ingestLabeledExamples([win, loss]);
     expect(ml.getReadiness()).toBe('READY');
+    expect(ml.hasTrainedModel()).toBe(true);
   });
   it('keeps per-asset buffers independent', () => {
     const ml = MLEngine.getInstance();

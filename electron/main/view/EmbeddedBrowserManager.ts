@@ -173,7 +173,7 @@ export class EmbeddedBrowserManager {
             entryPrice: click.entryPrice === null ? null : String(click.entryPrice),
             eventId: click.eventId,
             platformMode: click.platformMode,
-          });
+          }) ?? undefined;
         }
         evidence.discard(click.executionId);
         if (trade) this.emitTradeStateRefresh();
