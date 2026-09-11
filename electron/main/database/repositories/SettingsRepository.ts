@@ -1,9 +1,11 @@
 // ============================================================
 // MARS PRO V3 — Settings Repository
+// Validates both renderer writes and values restored from disk.
 // ============================================================
 
 import { Database } from '../Database';
 import { AppSettings, DEFAULT_SETTINGS } from '../../../../shared/types/ipc';
+import { validateSettingsPatch } from '../../ipc/inputValidation';
 
 export class SettingsRepository {
   private db: Database;
@@ -18,51 +20,37 @@ export class SettingsRepository {
       value: string;
     }>;
 
-    const settings: Record<string, unknown> = { ...DEFAULT_SETTINGS };
-
+    const settings: AppSettings = { ...DEFAULT_SETTINGS };
     for (const row of rows) {
       try {
-        settings[row.key] = JSON.parse(row.value);
+        const parsed = JSON.parse(row.value);
+        const validated = validateSettingsPatch({ [row.key]: parsed });
+        Object.assign(settings, validated);
       } catch {
-        settings[row.key] = row.value;
+        // Unknown, malformed, or out-of-range persisted settings are ignored.
       }
     }
-
-    return settings as unknown as AppSettings;
+    return settings;
   }
 
   get(key: keyof AppSettings): unknown {
-    const row = this.db
-      .prepare('SELECT value FROM settings WHERE key = ?')
-      .get(key) as { value: string } | undefined;
-
-    if (!row) {
-      return DEFAULT_SETTINGS[key];
-    }
-
-    try {
-      return JSON.parse(row.value);
-    } catch {
-      return row.value;
-    }
+    return this.getAll()[key];
   }
 
   set(key: keyof AppSettings, value: unknown): void {
     if (value === undefined) return;
-    const serialized = JSON.stringify(value);
-    this.db
-      .prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-      .run(key, serialized);
+    const validated = validateSettingsPatch({ [key]: value });
+    if (!(key in validated)) return;
+    this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+      .run(key, JSON.stringify(validated[key]));
   }
 
   updateAll(settings: Partial<AppSettings>): void {
-    if (!settings || typeof settings !== 'object') return;
+    const validated = validateSettingsPatch(settings);
     this.db.transaction(() => {
       const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-      for (const [key, value] of Object.entries(settings)) {
-        if (value === undefined) continue;
-        const serialized = JSON.stringify(value);
-        stmt.run(key, serialized);
+      for (const [key, value] of Object.entries(validated)) {
+        if (value !== undefined) stmt.run(key, JSON.stringify(value));
       }
     });
   }

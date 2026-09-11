@@ -52,12 +52,6 @@ export class DecisionEngine {
   private pendingEntryWindow: { targetTime: number; action: TradingAction; reason: string } | null = null;
   private frameCount = 0;
 
-  /**
-   * Fixed calibration profiles per analysis mode.
-   * SAFE: Strictest data-quality, strongest confirmation, fewest signals.
-   * BALANCED: Moderate threshold, balanced signal frequency.
-   * COMPREHENSIVE: Widest evidence, broader context, more opportunities.
-   */
   public static readonly CALIBRATION_PROFILES: Record<AnalysisMode, CalibrationProfile> = {
     [AnalysisMode.SAFE]: {
       minThreshold: 0.85,
@@ -89,11 +83,7 @@ export class DecisionEngine {
   };
 
   public setCalibrationMode(mode: AnalysisMode | string): void {
-    if (typeof mode === 'string') {
-      this.calibrationMode = fromLegacyMode(mode);
-    } else {
-      this.calibrationMode = mode;
-    }
+    this.calibrationMode = typeof mode === 'string' ? fromLegacyMode(mode) : mode;
   }
 
   public getCalibrationMode(): AnalysisMode {
@@ -101,7 +91,8 @@ export class DecisionEngine {
   }
 
   public profile(): CalibrationProfile {
-    return DecisionEngine.CALIBRATION_PROFILES[this.calibrationMode] || DecisionEngine.CALIBRATION_PROFILES[AnalysisMode.BALANCED];
+    return DecisionEngine.CALIBRATION_PROFILES[this.calibrationMode]
+      || DecisionEngine.CALIBRATION_PROFILES[AnalysisMode.BALANCED];
   }
 
   public getEvidenceEngine(): EvidenceEngine {
@@ -113,13 +104,10 @@ export class DecisionEngine {
     this.frameCount = 0;
   }
 
-  /**
-   * Primary decision method. Evaluates market observation and returns canonical RawDecisionResult.
-   */
   public decide(
     obs: MarketObservation | null | undefined,
     enabledExpiries?: string[],
-    currentStableAction: TradingAction = TradingAction.WAIT
+    currentStableAction: TradingAction = TradingAction.WAIT,
   ): RawDecisionResult {
     const timestamp = Date.now();
     this.frameCount++;
@@ -134,7 +122,7 @@ export class DecisionEngine {
         null,
         obs?.dataQuality || QualityLevel.FAILED,
         timestamp,
-        obs?.observationId
+        obs?.observationId,
       );
     }
 
@@ -149,22 +137,23 @@ export class DecisionEngine {
       volatility,
       momentum,
       (enabledExpiries as any) || ['auto'],
-      regime
+      regime,
     );
     const quantResult = this.computeQuantConfluence(obs);
     const quantConfluence = quantResult.score;
     const directionalDepth = this.getDirectionalDepth(obs);
 
-    // Dynamic WAIT Score: continuously evaluates setup readiness from 15% to 88%
     const rawWaitRatio = (
-      evidence.overallStrength * 0.40 +
-      (evidence.agreementScore || 0) * 0.30 +
-      (quantConfluence || 0.5) * 0.20 +
-      Math.min(1, directionalDepth / 4) * 0.10
+      evidence.overallStrength * 0.40
+      + (evidence.agreementScore || 0) * 0.30
+      + (quantConfluence || 0.5) * 0.20
+      + Math.min(1, directionalDepth / 4) * 0.10
     );
-    const waitConfidence: CanonicalConfidence = Math.max(0.15, Math.min(0.88, Math.round(rawWaitRatio * 100) / 100));
+    const waitConfidence: CanonicalConfidence = Math.max(
+      0.15,
+      Math.min(0.88, Math.round(rawWaitRatio * 100) / 100),
+    );
 
-    // Trend strength filter
     const trendStrengthWait = this.getTrendStrengthWaitReason(obs);
     if (trendStrengthWait) {
       return this.wait(
@@ -176,7 +165,7 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
@@ -187,7 +176,6 @@ export class DecisionEngine {
     const horizonSuitability = this.evaluateHorizonSuitability(obs, projectedCandles, momentum, structure);
     const risk = this.riskEngine.evaluate(obs, evidence, expirySec, regime);
 
-    // WAIT Gate 1: No trend or insufficient data
     if (trend === TrendDirection.NEUTRAL && structure === MarketStructure.INSUFFICIENT_DATA) {
       return this.wait(
         WaitReason.SIDEWAYS_MARKET,
@@ -198,12 +186,12 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
-    // WAIT Gate 2: Consolidation with no quantitative confluence
-    const choppinessScore = obs.volatilityEvidence?.level === VolatilityLevel.HIGH && structure === MarketStructure.CONSOLIDATION ? 0.8 : 0.2;
+    const choppinessScore = obs.volatilityEvidence?.level === VolatilityLevel.HIGH
+      && structure === MarketStructure.CONSOLIDATION ? 0.8 : 0.2;
     if ((structure === MarketStructure.CONSOLIDATION && quantConfluence < 0.55) || choppinessScore > 0.7) {
       return this.wait(
         WaitReason.SIDEWAYS_MARKET,
@@ -214,13 +202,14 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
-    // WAIT Gate 3: Weak momentum
     if (momentum === MomentumLevel.WEAK && quantConfluence < 0.6) {
-      const mb = trend === TrendDirection.BULLISH ? MarketBias.BULLISH : trend === TrendDirection.BEARISH ? MarketBias.BEARISH : MarketBias.NEUTRAL;
+      const mb = trend === TrendDirection.BULLISH
+        ? MarketBias.BULLISH
+        : trend === TrendDirection.BEARISH ? MarketBias.BEARISH : MarketBias.NEUTRAL;
       return this.wait(
         WaitReason.WEAK_MOMENTUM,
         evidence.overallStrength,
@@ -230,15 +219,17 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
-    // WAIT Gate 4: Extreme volatility
     const profile = this.profile();
     if (volatility === VolatilityLevel.HIGH) {
-      const isBreakout = regime === MarketRegime.BREAKOUT || structure === MarketStructure.BREAKOUT_UP || structure === MarketStructure.BREAKOUT_DOWN;
-      const isStrongConfluence = quantConfluence >= profile.minQuantForRelax || evidence.overallStrength >= profile.minEvidenceForEntry;
+      const isBreakout = regime === MarketRegime.BREAKOUT
+        || structure === MarketStructure.BREAKOUT_UP
+        || structure === MarketStructure.BREAKOUT_DOWN;
+      const isStrongConfluence = quantConfluence >= profile.minQuantForRelax
+        || evidence.overallStrength >= profile.minEvidenceForEntry;
       if (!isBreakout || !isStrongConfluence) {
         return this.wait(
           WaitReason.HIGH_VOLATILITY,
@@ -249,19 +240,20 @@ export class DecisionEngine {
           expiry,
           obs.dataQuality,
           timestamp,
-          obs.observationId
+          obs.observationId,
         );
       }
     }
 
-    // Confluence gates with Hysteresis
     const sensitivityBoost = this.getSensitivityBoost(obs);
     const isSignalActive = currentStableAction !== TradingAction.WAIT;
-    const minConfluenceThreshold = (isSignalActive ? profile.exitHysteresis : profile.entryHysteresis) - sensitivityBoost;
+    const minConfluenceThreshold = (isSignalActive ? profile.exitHysteresis : profile.entryHysteresis)
+      - sensitivityBoost;
     const agreement = evidence.agreementScore || 0;
     const hasStrongQuant = quantConfluence >= profile.minQuantForRelax;
     const hasStrongEvidence = evidence.overallStrength >= profile.minEvidenceForEntry && agreement >= 0.55;
-    const hasBasicConfluence = evidence.overallStrength >= minConfluenceThreshold && agreement >= minConfluenceThreshold;
+    const hasBasicConfluence = evidence.overallStrength >= minConfluenceThreshold
+      && agreement >= minConfluenceThreshold;
 
     if (!hasStrongQuant && !hasStrongEvidence && !hasBasicConfluence) {
       return this.wait(
@@ -273,7 +265,7 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
@@ -281,7 +273,8 @@ export class DecisionEngine {
       const strategicSetup = this.evaluateStrategicSetup(obs, regime, momentum, structure);
       if (strategicSetup) {
         const action = strategicSetup.direction;
-        const reasons = [strategicSetup.type.replace(/_/g, ' ').toLowerCase() + ' — ' + (action === TradingAction.BUY ? 'bullish' : 'bearish') + ' entry'];
+        const reasons = [strategicSetup.type.replace(/_/g, ' ').toLowerCase()
+          + ' — ' + (action === TradingAction.BUY ? 'bullish' : 'bearish') + ' entry'];
         const signalStrength = Math.max(strategicSetup.confidence, 0.70);
         const confidence: CanonicalConfidence = strategicSetup.confidence;
         if (signalStrength >= profile.minThreshold && confidence >= profile.minThreshold && risk !== RiskLevel.HIGH) {
@@ -309,60 +302,118 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
-    // Directional Determination — Symmetric BUY / SELL Evaluation
     const isRegimeBearish = regime === MarketRegime.TRENDING && trend === TrendDirection.BEARISH;
     const isRegimeBullish = regime === MarketRegime.TRENDING && trend === TrendDirection.BULLISH;
 
     const bullish =
-      (trend === TrendDirection.BULLISH && !isRegimeBearish) ||
-      (structure === MarketStructure.UPTREND && !isRegimeBearish) ||
-      (structure === MarketStructure.BREAKOUT_UP) ||
-      (quantConfluence >= 0.65 && quantBias === MarketBias.BULLISH && !isRegimeBearish);
+      (trend === TrendDirection.BULLISH && !isRegimeBearish)
+      || (structure === MarketStructure.UPTREND && !isRegimeBearish)
+      || structure === MarketStructure.BREAKOUT_UP
+      || (quantConfluence >= 0.65 && quantBias === MarketBias.BULLISH && !isRegimeBearish);
 
     const bearish =
-      (trend === TrendDirection.BEARISH && !isRegimeBullish) ||
-      (structure === MarketStructure.DOWNTREND && !isRegimeBullish) ||
-      (structure === MarketStructure.BREAKOUT_DOWN) ||
-      (quantConfluence >= 0.65 && quantBias === MarketBias.BEARISH && !isRegimeBullish);
+      (trend === TrendDirection.BEARISH && !isRegimeBullish)
+      || (structure === MarketStructure.DOWNTREND && !isRegimeBullish)
+      || structure === MarketStructure.BREAKOUT_DOWN
+      || (quantConfluence >= 0.65 && quantBias === MarketBias.BEARISH && !isRegimeBullish);
 
     if (bullish && bearish) {
-      const detail = trend === TrendDirection.BULLISH ? 'Trend Bullish but Structure Bearish' : 'Trend Bearish but Structure Bullish';
-      const reasonText = `${WaitReason.CONFLICTING_SIGNALS}: ${detail} - Awaiting Confluence`;
-      return this.wait(reasonText, evidence.overallStrength, waitConfidence, risk, MarketBias.NEUTRAL, expiry, obs.dataQuality, timestamp, obs.observationId);
+      const detail = trend === TrendDirection.BULLISH
+        ? 'Trend Bullish but Structure Bearish'
+        : 'Trend Bearish but Structure Bullish';
+      return this.wait(
+        `${WaitReason.CONFLICTING_SIGNALS}: ${detail} - Awaiting Confluence`,
+        evidence.overallStrength,
+        waitConfidence,
+        risk,
+        MarketBias.NEUTRAL,
+        expiry,
+        obs.dataQuality,
+        timestamp,
+        obs.observationId,
+      );
     }
 
-    if (quantBias !== MarketBias.NEUTRAL && ((bullish && quantBias === MarketBias.BEARISH) || (bearish && quantBias === MarketBias.BULLISH))) {
-      const reasonText = `${WaitReason.CONFLICTING_SIGNALS}: Quantitative indicators oppose market structure`;
-      return this.wait(reasonText, evidence.overallStrength, waitConfidence, risk, MarketBias.NEUTRAL, expiry, obs.dataQuality, timestamp, obs.observationId);
+    if (quantBias !== MarketBias.NEUTRAL
+      && ((bullish && quantBias === MarketBias.BEARISH)
+        || (bearish && quantBias === MarketBias.BULLISH))) {
+      return this.wait(
+        `${WaitReason.CONFLICTING_SIGNALS}: Quantitative indicators oppose market structure`,
+        evidence.overallStrength,
+        waitConfidence,
+        risk,
+        MarketBias.NEUTRAL,
+        expiry,
+        obs.dataQuality,
+        timestamp,
+        obs.observationId,
+      );
     }
 
     if (!bullish && !bearish) {
-      const reasonText = `${WaitReason.CONFLICTING_SIGNALS}: Trend Neutral & Structure Indecisive - Awaiting Breakout`;
-      return this.wait(reasonText, evidence.overallStrength, waitConfidence, risk, MarketBias.NEUTRAL, expiry, obs.dataQuality, timestamp, obs.observationId);
+      return this.wait(
+        `${WaitReason.CONFLICTING_SIGNALS}: Trend Neutral & Structure Indecisive - Awaiting Breakout`,
+        evidence.overallStrength,
+        waitConfidence,
+        risk,
+        MarketBias.NEUTRAL,
+        expiry,
+        obs.dataQuality,
+        timestamp,
+        obs.observationId,
+      );
     }
 
     const action = bullish ? TradingAction.BUY : TradingAction.SELL;
     const shortExpiryTrap = this.detectShortExpiryTrap(obs, action, expirySec, momentum, structure, regime);
     if (shortExpiryTrap) {
-      const reasonText = `${WaitReason.LOW_CONFIRMATION}: ${shortExpiryTrap}`;
-      return this.wait(reasonText, evidence.overallStrength, waitConfidence, risk, bullish ? MarketBias.BULLISH : MarketBias.BEARISH, expiry, obs.dataQuality, timestamp, obs.observationId);
+      return this.wait(
+        `${WaitReason.LOW_CONFIRMATION}: ${shortExpiryTrap}`,
+        evidence.overallStrength,
+        waitConfidence,
+        risk,
+        bullish ? MarketBias.BULLISH : MarketBias.BEARISH,
+        expiry,
+        obs.dataQuality,
+        timestamp,
+        obs.observationId,
+      );
     }
 
-    // Extreme RSI Protection: block buying into extreme overbought (>= 78) or selling into extreme oversold (<= 22) unless breakout
-    const isBreakout = regime === MarketRegime.BREAKOUT || structure === MarketStructure.BREAKOUT_UP || structure === MarketStructure.BREAKOUT_DOWN;
+    const isBreakout = regime === MarketRegime.BREAKOUT
+      || structure === MarketStructure.BREAKOUT_UP
+      || structure === MarketStructure.BREAKOUT_DOWN;
     const qmRsi = obs.quantitativeMetrics?.rsi;
     if (qmRsi && !isBreakout) {
       if (bullish && qmRsi.value >= 78) {
-        const reasonText = `${WaitReason.CONFLICTING_SIGNALS}: RSI extreme overbought (${qmRsi.value.toFixed(0)}) — High Reversal Risk`;
-        return this.wait(reasonText, evidence.overallStrength, waitConfidence, RiskLevel.HIGH, MarketBias.NEUTRAL, expiry, obs.dataQuality, timestamp, obs.observationId);
+        return this.wait(
+          `${WaitReason.CONFLICTING_SIGNALS}: RSI extreme overbought (${qmRsi.value.toFixed(0)}) — High Reversal Risk`,
+          evidence.overallStrength,
+          waitConfidence,
+          RiskLevel.HIGH,
+          MarketBias.NEUTRAL,
+          expiry,
+          obs.dataQuality,
+          timestamp,
+          obs.observationId,
+        );
       }
       if (bearish && qmRsi.value <= 22) {
-        const reasonText = `${WaitReason.CONFLICTING_SIGNALS}: RSI extreme oversold (${qmRsi.value.toFixed(0)}) — High Reversal Risk`;
-        return this.wait(reasonText, evidence.overallStrength, waitConfidence, RiskLevel.HIGH, MarketBias.NEUTRAL, expiry, obs.dataQuality, timestamp, obs.observationId);
+        return this.wait(
+          `${WaitReason.CONFLICTING_SIGNALS}: RSI extreme oversold (${qmRsi.value.toFixed(0)}) — High Reversal Risk`,
+          evidence.overallStrength,
+          waitConfidence,
+          RiskLevel.HIGH,
+          MarketBias.NEUTRAL,
+          expiry,
+          obs.dataQuality,
+          timestamp,
+          obs.observationId,
+        );
       }
     }
 
@@ -370,9 +421,10 @@ export class DecisionEngine {
     const signalStrength = this.computeSignalStrength(obs, evidence, quantConfluence, regime, horizonSuitability);
     const confidence = this.computeConfidence(obs, evidence, risk, regime, horizonSuitability, action);
 
-    // Mode-specific threshold gating
-    const minThreshold = profile.minThreshold;
-    if (confidence === null || signalStrength < minThreshold || confidence < minThreshold || risk === RiskLevel.HIGH) {
+    if (confidence === null
+      || signalStrength < profile.minThreshold
+      || confidence < profile.minThreshold
+      || risk === RiskLevel.HIGH) {
       return this.wait(
         WaitReason.LOW_CONFIRMATION,
         evidence.overallStrength,
@@ -382,7 +434,7 @@ export class DecisionEngine {
         expiry,
         obs.dataQuality,
         timestamp,
-        obs.observationId
+        obs.observationId,
       );
     }
 
@@ -405,27 +457,23 @@ export class DecisionEngine {
     obs: MarketObservation,
     action: TradingAction,
     signalStrength: number,
-    evidence: EvidenceBreakdown
+    evidence: EvidenceBreakdown,
   ): string {
     const profile = this.profile();
     if (signalStrength >= profile.minThreshold * 0.93 && (evidence.agreementScore || 0) >= 0.65) {
       return 'ENTRY NOW';
     }
     const sr = obs.supportResistanceEvidence;
-    if (sr && obs.candles.length > 0) {
-      const lastCandle = obs.candles[obs.candles.length - 1];
-      if (lastCandle && action === TradingAction.BUY && sr.nearestSupport) {
-        const dist = Math.abs(lastCandle.bodyBottomPx - sr.nearestSupport.pricePx);
-        if (dist < 30) return 'ENTRY NOW';
+    const closePx = this.getLatestClosePx(obs);
+    if (sr && closePx !== null) {
+      if (action === TradingAction.BUY && sr.nearestSupport) {
+        if (Math.abs(closePx - sr.nearestSupport.pricePx) < 30) return 'ENTRY NOW';
       }
-      if (lastCandle && action === TradingAction.SELL && sr.nearestResistance) {
-        const dist = Math.abs(lastCandle.bodyBottomPx - sr.nearestResistance.pricePx);
-        if (dist < 30) return 'ENTRY NOW';
+      if (action === TradingAction.SELL && sr.nearestResistance) {
+        if (Math.abs(closePx - sr.nearestResistance.pricePx) < 30) return 'ENTRY NOW';
       }
     }
-    if (signalStrength >= 0.50) {
-      return 'ENTRY IN 3s';
-    }
+    if (signalStrength >= 0.50) return 'ENTRY IN 3s';
     return 'ENTRY IN 5s';
   }
 
@@ -433,15 +481,14 @@ export class DecisionEngine {
     obs: MarketObservation,
     regime: MarketRegime,
     momentum: MomentumLevel,
-    structure: MarketStructure
+    structure: MarketStructure,
   ): { type: string; direction: TradingAction; confidence: number } | null {
     const sr = obs.supportResistanceEvidence;
     const qm = obs.quantitativeMetrics;
-    const price = obs.currentPrice;
-    if (!sr || !price || price <= 0) return null;
 
-    // SETUP 1: Breakout Confirmation (Symmetric)
-    if (regime === MarketRegime.BREAKOUT || structure === MarketStructure.BREAKOUT_UP || structure === MarketStructure.BREAKOUT_DOWN) {
+    if (regime === MarketRegime.BREAKOUT
+      || structure === MarketStructure.BREAKOUT_UP
+      || structure === MarketStructure.BREAKOUT_DOWN) {
       if (momentum === MomentumLevel.STRONG && qm?.rsi) {
         const rsi = qm.rsi.value;
         if (structure === MarketStructure.BREAKOUT_UP && rsi < 70) {
@@ -453,24 +500,24 @@ export class DecisionEngine {
       }
     }
 
-    // SETUP 2: Pullback Entry (Symmetric)
     const trend = obs.trendEvidence?.direction || TrendDirection.NEUTRAL;
-    if (trend !== TrendDirection.NEUTRAL && obs.candles.length >= 3) {
+    const closePx = this.getLatestClosePx(obs);
+    if (trend !== TrendDirection.NEUTRAL && sr && closePx !== null && obs.candles.length >= 3) {
       const lastCandle = obs.candles[obs.candles.length - 1];
       const prevCandle = obs.candles[obs.candles.length - 2];
       if (lastCandle && prevCandle) {
         if (trend === TrendDirection.BULLISH && sr.nearestSupport) {
-          const distToSupport = Math.abs(price - sr.nearestSupport.pricePx);
-          const isNearSupport = distToSupport < 25;
-          const isBullishCandle = lastCandle.direction === CandleDirection.BULLISH && lastCandle.bodySizePx > prevCandle.bodySizePx * 0.6;
+          const isNearSupport = Math.abs(closePx - sr.nearestSupport.pricePx) < 25;
+          const isBullishCandle = lastCandle.direction === CandleDirection.BULLISH
+            && lastCandle.bodySizePx > prevCandle.bodySizePx * 0.6;
           if (isNearSupport && isBullishCandle && regime !== MarketRegime.CHOPPY) {
             return { type: 'PULLBACK_ENTRY', direction: TradingAction.BUY, confidence: 0.75 };
           }
         }
         if (trend === TrendDirection.BEARISH && sr.nearestResistance) {
-          const distToResistance = Math.abs(price - sr.nearestResistance.pricePx);
-          const isNearResistance = distToResistance < 25;
-          const isBearishCandle = lastCandle.direction === CandleDirection.BEARISH && lastCandle.bodySizePx > prevCandle.bodySizePx * 0.6;
+          const isNearResistance = Math.abs(closePx - sr.nearestResistance.pricePx) < 25;
+          const isBearishCandle = lastCandle.direction === CandleDirection.BEARISH
+            && lastCandle.bodySizePx > prevCandle.bodySizePx * 0.6;
           if (isNearResistance && isBearishCandle && regime !== MarketRegime.CHOPPY) {
             return { type: 'PULLBACK_ENTRY', direction: TradingAction.SELL, confidence: 0.75 };
           }
@@ -478,7 +525,6 @@ export class DecisionEngine {
       }
     }
 
-    // SETUP 3: Squeeze Release (Symmetric)
     if (qm?.bollingerBands?.isSqueeze && momentum === MomentumLevel.STRONG) {
       const bias = qm.priceVsEmaTrend;
       if (bias === 'BULLISH') {
@@ -496,7 +542,7 @@ export class DecisionEngine {
     obs: MarketObservation,
     projectedCandles: number,
     momentum: MomentumLevel,
-    structure: MarketStructure
+    structure: MarketStructure,
   ): number {
     let suitability = 1.0;
     if (projectedCandles <= 3) {
@@ -515,9 +561,11 @@ export class DecisionEngine {
     evidence: EvidenceBreakdown,
     quantConfluence: number,
     regime: MarketRegime,
-    horizonSuitability = 1.0
+    horizonSuitability = 1.0,
   ): number {
-    let base = evidence.overallStrength * 0.5 + (evidence.agreementScore || 0) * 0.3 + quantConfluence * 0.2;
+    let base = evidence.overallStrength * 0.5
+      + (evidence.agreementScore || 0) * 0.3
+      + quantConfluence * 0.2;
     if (regime === MarketRegime.TRENDING) base += 0.05;
     else if (regime === MarketRegime.BREAKOUT) base += 0.08;
     else if (regime === MarketRegime.CHOPPY) base -= 0.05;
@@ -544,72 +592,85 @@ export class DecisionEngine {
     risk: CanonicalRisk,
     regime: MarketRegime,
     horizonSuitability = 1.0,
-    action: TradingAction = TradingAction.WAIT
+    action: TradingAction = TradingAction.WAIT,
   ): CanonicalConfidence {
     const pillarAgreement = evidence.agreementScore;
-    if (pillarAgreement === null || pillarAgreement === undefined) {
-      return null;
-    }
+    if (pillarAgreement === null || pillarAgreement === undefined) return null;
 
     const riskPenalty = this.riskToPenalty(risk);
-    const rrScore = this.computeRRScore(obs);
+    const rrScore = this.computeRRScore(obs, action);
     const regimeAlignment = this.computeRegimeAlignment(obs, regime);
 
-    let calibrated =
-      pillarAgreement * 0.35 +
-      evidence.overallStrength * 0.25 +
-      (1 - riskPenalty) * 0.20 +
-      rrScore * 0.10 +
-      regimeAlignment * 0.10;
+    let calibrated = pillarAgreement * 0.35
+      + evidence.overallStrength * 0.25
+      + (1 - riskPenalty) * 0.20
+      + rrScore * 0.10
+      + regimeAlignment * 0.10;
 
     calibrated *= horizonSuitability;
 
-    if (regime === MarketRegime.HIGH_VOLATILITY || regime === MarketRegime.CHOPPY) {
-      calibrated *= 0.85;
-    }
-    if (regime === MarketRegime.RANGING) {
-      calibrated *= 0.92;
-    }
+    if (regime === MarketRegime.HIGH_VOLATILITY || regime === MarketRegime.CHOPPY) calibrated *= 0.85;
+    if (regime === MarketRegime.RANGING) calibrated *= 0.92;
 
-    // Overbought / Oversold protection: Penalize buying at cyclical peaks and selling at cyclical bottoms
     const rsiVal = obs.quantitativeMetrics?.rsi?.value;
     if (typeof rsiVal === 'number') {
       if (action === TradingAction.BUY && rsiVal > 70) {
-        // RSI > 70: Overbought risk penalty on BUY (e.g. at RSI 75: 10% penalty)
-        const excess = rsiVal - 70;
-        calibrated *= Math.max(0.70, 1 - excess * 0.02);
+        calibrated *= Math.max(0.70, 1 - (rsiVal - 70) * 0.02);
       } else if (action === TradingAction.SELL && rsiVal < 30) {
-        // RSI < 30: Oversold risk penalty on SELL (e.g. at RSI 25: 10% penalty)
-        const excess = 30 - rsiVal;
-        calibrated *= Math.max(0.70, 1 - excess * 0.02);
+        calibrated *= Math.max(0.70, 1 - (30 - rsiVal) * 0.02);
       }
     }
 
     const trendStrength = obs.quantitativeMetrics?.trendStrength;
-    if (trendStrength?.status === 'VALID' && trendStrength.adx != null && trendStrength.choppiness != null) {
+    if (trendStrength?.status === 'VALID'
+      && trendStrength.adx != null
+      && trendStrength.choppiness != null) {
       const strengthFactor = Math.max(0, Math.min(1, trendStrength.adx / 35));
       const chopFactor = Math.max(0, Math.min(1, (75 - trendStrength.choppiness) / 35));
       calibrated *= 0.75 + 0.25 * (strengthFactor * 0.6 + chopFactor * 0.4);
     }
 
-    const CONFIDENCE_CEILING = 0.95;
-    return Math.min(CONFIDENCE_CEILING, Math.max(0.40, calibrated));
+    return Math.min(0.95, Math.max(0.40, calibrated));
   }
 
-  public computeRRScore(obs: MarketObservation): number {
+  /**
+   * Return the latest detected candle close in chart-pixel coordinates.
+   * Market prices must never be compared with structural pixel levels.
+   */
+  public getLatestClosePx(obs: MarketObservation): number | null {
+    const candle = obs.candles.at(-1);
+    if (!candle
+      || !Number.isFinite(candle.bodyTopPx)
+      || !Number.isFinite(candle.bodyBottomPx)) {
+      return null;
+    }
+    if (candle.direction === CandleDirection.BULLISH) return candle.bodyTopPx;
+    if (candle.direction === CandleDirection.BEARISH) return candle.bodyBottomPx;
+    return (candle.bodyTopPx + candle.bodyBottomPx) / 2;
+  }
+
+  public computeRRScore(
+    obs: MarketObservation,
+    action: TradingAction = TradingAction.WAIT,
+  ): number {
     const sr = obs.supportResistanceEvidence;
-    if (!sr || !sr.nearestSupport || !sr.nearestResistance) return 0.5;
-    const price = obs.currentPrice;
-    if (!price || price <= 0) return 0.5;
+    const closePx = this.getLatestClosePx(obs);
+    if (!sr || !sr.nearestSupport || !sr.nearestResistance || closePx === null) return 0.5;
+    if (!Number.isFinite(sr.nearestSupport.pricePx)
+      || !Number.isFinite(sr.nearestResistance.pricePx)) return 0.5;
 
-    const distToSupport = Math.abs(price - sr.nearestSupport.pricePx);
-    const distToResistance = Math.abs(sr.nearestResistance.pricePx - price);
-    if (distToSupport === 0 && distToResistance === 0) return 0.5;
+    const distToSupportPx = Math.abs(closePx - sr.nearestSupport.pricePx);
+    const distToResistancePx = Math.abs(closePx - sr.nearestResistance.pricePx);
+    if (distToSupportPx === 0 && distToResistancePx === 0) return 0.5;
 
-    const buyRR = distToSupport > 0 ? distToResistance / distToSupport : 0;
-    const sellRR = distToResistance > 0 ? distToSupport / distToResistance : 0;
-    const bestRR = Math.max(buyRR, sellRR);
-    return Math.min(1, 0.25 + bestRR * 0.25);
+    let directionalRR = 1;
+    if (action === TradingAction.BUY) {
+      directionalRR = distToResistancePx / Math.max(1, distToSupportPx);
+    } else if (action === TradingAction.SELL) {
+      directionalRR = distToSupportPx / Math.max(1, distToResistancePx);
+    }
+
+    return Math.min(1, 0.25 + Math.max(0, directionalRR) * 0.25);
   }
 
   public computeRegimeAlignment(obs: MarketObservation, regime: MarketRegime): number {
@@ -626,7 +687,7 @@ export class DecisionEngine {
       obs.candles,
       obs.trendEvidence?.direction || TrendDirection.NEUTRAL,
       obs.volatilityEvidence?.level || VolatilityLevel.HIGH,
-      obs.momentumEvidence?.level || MomentumLevel.WEAK
+      obs.momentumEvidence?.level || MomentumLevel.WEAK,
     );
   }
 
@@ -646,10 +707,13 @@ export class DecisionEngine {
   }
 
   public getDirectionalDepth(obs: MarketObservation): number {
-    let depth = this.evidenceEngine.countBias(obs, MarketBias.BULLISH) + this.evidenceEngine.countBias(obs, MarketBias.BEARISH);
+    let depth = this.evidenceEngine.countBias(obs, MarketBias.BULLISH)
+      + this.evidenceEngine.countBias(obs, MarketBias.BEARISH);
     const recent = obs.candles.slice(-5);
-    const bullishCandles = recent.filter((c) => c.direction === CandleDirection.BULLISH && c.quality >= 0.6).length;
-    const bearishCandles = recent.filter((c) => c.direction === CandleDirection.BEARISH && c.quality >= 0.6).length;
+    const bullishCandles = recent
+      .filter((c) => c.direction === CandleDirection.BULLISH && c.quality >= 0.6).length;
+    const bearishCandles = recent
+      .filter((c) => c.direction === CandleDirection.BEARISH && c.quality >= 0.6).length;
     if (bullishCandles >= 4 || bearishCandles >= 4) depth++;
     return depth;
   }
@@ -660,10 +724,12 @@ export class DecisionEngine {
     expirySec: number,
     momentum: MomentumLevel,
     structure: MarketStructure,
-    regime: MarketRegime
+    regime: MarketRegime,
   ): string | null {
     if (expirySec > 60) return null;
-    const isConfirmedBreakout = structure === MarketStructure.BREAKOUT_UP || structure === MarketStructure.BREAKOUT_DOWN || regime === MarketRegime.BREAKOUT;
+    const isConfirmedBreakout = structure === MarketStructure.BREAKOUT_UP
+      || structure === MarketStructure.BREAKOUT_DOWN
+      || regime === MarketRegime.BREAKOUT;
     if ((regime === MarketRegime.RANGING || regime === MarketRegime.CHOPPY) && !isConfirmedBreakout) {
       return 'short-expiry skipped in ranging/choppy market; waiting for breakout or clean retest';
     }
@@ -673,31 +739,35 @@ export class DecisionEngine {
 
     const bullishCount = recent.filter((c) => c.direction === CandleDirection.BULLISH).length;
     const bearishCount = recent.filter((c) => c.direction === CandleDirection.BEARISH).length;
-    const avgBodyRatio = recent.reduce((sum, c) => sum + (c.rangePx > 0 ? c.bodySizePx / c.rangePx : 0), 0) / recent.length;
+    const avgBodyRatio = recent.reduce(
+      (sum, c) => sum + (c.rangePx > 0 ? c.bodySizePx / c.rangePx : 0),
+      0,
+    ) / recent.length;
     const hasOppositePullback = action === TradingAction.BUY
       ? recent.slice(-2).some((c) => c.direction === CandleDirection.BEARISH)
       : recent.slice(-2).some((c) => c.direction === CandleDirection.BULLISH);
 
-    const qm = obs.quantitativeMetrics;
-    const rsiValue = qm?.rsi?.value;
-    const nearResistance = obs.supportResistanceEvidence?.nearestResistance?.distancePts ?? Number.POSITIVE_INFINITY;
-    const nearSupport = obs.supportResistanceEvidence?.nearestSupport?.distancePts ?? Number.POSITIVE_INFINITY;
+    const rsiValue = obs.quantitativeMetrics?.rsi?.value;
+    const nearResistance = obs.supportResistanceEvidence?.nearestResistance?.distancePts
+      ?? Number.POSITIVE_INFINITY;
+    const nearSupport = obs.supportResistanceEvidence?.nearestSupport?.distancePts
+      ?? Number.POSITIVE_INFINITY;
 
-    if (action === TradingAction.BUY &&
-      momentum === MomentumLevel.STRONG &&
-      (structure === MarketStructure.UPTREND || structure === MarketStructure.BREAKOUT_UP) &&
-      bullishCount >= 4 &&
-      avgBodyRatio >= 0.42 &&
-      !hasOppositePullback) {
+    if (action === TradingAction.BUY
+      && momentum === MomentumLevel.STRONG
+      && (structure === MarketStructure.UPTREND || structure === MarketStructure.BREAKOUT_UP)
+      && bullishCount >= 4
+      && avgBodyRatio >= 0.42
+      && !hasOppositePullback) {
       return 'short-expiry buy skipped after extended bullish candle run; waiting for pullback/retest';
     }
 
-    if (action === TradingAction.SELL &&
-      momentum === MomentumLevel.STRONG &&
-      (structure === MarketStructure.DOWNTREND || structure === MarketStructure.BREAKOUT_DOWN) &&
-      bearishCount >= 4 &&
-      avgBodyRatio >= 0.42 &&
-      !hasOppositePullback) {
+    if (action === TradingAction.SELL
+      && momentum === MomentumLevel.STRONG
+      && (structure === MarketStructure.DOWNTREND || structure === MarketStructure.BREAKOUT_DOWN)
+      && bearishCount >= 4
+      && avgBodyRatio >= 0.42
+      && !hasOppositePullback) {
       return 'short-expiry sell skipped after extended bearish candle run; waiting for pullback/retest';
     }
 
@@ -728,9 +798,7 @@ export class DecisionEngine {
       [AnalysisMode.COMPREHENSIVE]: { minAdx: 14, maxChoppiness: 68, blockChoppiness: 74 },
     }[this.calibrationMode];
 
-    if (metrics.choppiness >= thresholds.blockChoppiness) {
-      return WaitReason.CHOPPY_MARKET;
-    }
+    if (metrics.choppiness >= thresholds.blockChoppiness) return WaitReason.CHOPPY_MARKET;
     if (metrics.adx < thresholds.minAdx || metrics.choppiness > thresholds.maxChoppiness) {
       return WaitReason.WEAK_TREND_STRENGTH;
     }
@@ -752,28 +820,28 @@ export class DecisionEngine {
 
     if (qm.bollingerBands) {
       const rsiVal = qm.rsi?.value ?? 50;
-      const rsiOversold = rsiVal < 35;
-      const rsiOverbought = rsiVal > 65;
-      if (qm.bollingerBands.touchLower && rsiOversold) { totalSignals++; bullishSignals++; }
-      if (qm.bollingerBands.touchUpper && rsiOverbought) { totalSignals++; bearishSignals++; }
+      if (qm.bollingerBands.touchLower && rsiVal < 35) { totalSignals++; bullishSignals++; }
+      if (qm.bollingerBands.touchUpper && rsiVal > 65) { totalSignals++; bearishSignals++; }
       if (qm.bollingerBands.rejectionLower) { totalSignals++; bullishSignals++; }
       if (qm.bollingerBands.rejectionUpper) { totalSignals++; bearishSignals++; }
     }
 
     if (qm.patterns) {
-      if (qm.patterns.isBullishEngulfing || qm.patterns.isPinbarBullish) { totalSignals++; bullishSignals++; }
-      if (qm.patterns.isBearishEngulfing || qm.patterns.isPinbarBearish) { totalSignals++; bearishSignals++; }
+      if (qm.patterns.isBullishEngulfing || qm.patterns.isPinbarBullish) {
+        totalSignals++; bullishSignals++;
+      }
+      if (qm.patterns.isBearishEngulfing || qm.patterns.isPinbarBearish) {
+        totalSignals++; bearishSignals++;
+      }
     }
 
     if (qm.priceVsEmaTrend === 'BULLISH') { totalSignals++; bullishSignals++; }
     if (qm.priceVsEmaTrend === 'BEARISH') { totalSignals++; bearishSignals++; }
-
-    if (qm.fibonacci?.inGoldenZone) { totalSignals++; }
+    if (qm.fibonacci?.inGoldenZone) totalSignals++;
 
     if (totalSignals === 0) return { score: 0, bias: MarketBias.NEUTRAL };
 
-    const maxSide = Math.max(bullishSignals, bearishSignals);
-    const score = maxSide / totalSignals;
+    const score = Math.max(bullishSignals, bearishSignals) / totalSignals;
     let bias = MarketBias.NEUTRAL;
     if (bullishSignals > bearishSignals) bias = MarketBias.BULLISH;
     else if (bearishSignals > bullishSignals) bias = MarketBias.BEARISH;
@@ -784,19 +852,21 @@ export class DecisionEngine {
     obs: MarketObservation,
     evidence: EvidenceBreakdown,
     quantConfluence: number,
-    bullish: boolean
+    bullish: boolean,
   ): string[] {
     const reasons: string[] = [];
     const dir = bullish ? 'Bullish' : 'Bearish';
     const qm = obs.quantitativeMetrics;
     const trend = obs.trendEvidence?.direction || TrendDirection.NEUTRAL;
-    const isCounterTrend = (bullish && trend === TrendDirection.BEARISH) || (!bullish && trend === TrendDirection.BULLISH);
+    const isCounterTrend = (bullish && trend === TrendDirection.BEARISH)
+      || (!bullish && trend === TrendDirection.BULLISH);
     const prefix = isCounterTrend ? 'Counter Trend Reversal: ' : '';
 
     const structure = obs.structureEvidence?.structure;
-    if (structure && structure !== MarketStructure.INSUFFICIENT_DATA && structure !== MarketStructure.CONSOLIDATION) {
-      const label = structure.replace(/_/g, ' ').toLowerCase();
-      reasons.push(`${prefix}${dir} market structure confirms the active setup (${label})`);
+    if (structure
+      && structure !== MarketStructure.INSUFFICIENT_DATA
+      && structure !== MarketStructure.CONSOLIDATION) {
+      reasons.push(`${prefix}${dir} market structure confirms the active setup (${structure.replace(/_/g, ' ').toLowerCase()})`);
     } else {
       reasons.push(`${prefix}${dir} setup detected across swing progression`);
     }
@@ -828,11 +898,9 @@ export class DecisionEngine {
     if (qm?.bollingerBands) {
       const bb = qm.bollingerBands;
       const rsiVal = qm.rsi?.value ?? 50;
-      const rsiOversold = rsiVal < 35;
-      const rsiOverbought = rsiVal > 65;
-      if (bullish && bb.touchLower && rsiOversold) {
+      if (bullish && bb.touchLower && rsiVal < 35) {
         reasons.push(`Lower Bollinger touch + RSI oversold (${rsiVal.toFixed(0)}) — double support`);
-      } else if (!bullish && bb.touchUpper && rsiOverbought) {
+      } else if (!bullish && bb.touchUpper && rsiVal > 65) {
         reasons.push(`Upper Bollinger touch + RSI overbought (${rsiVal.toFixed(0)}) — double resistance`);
       } else if (bb.isSqueeze) {
         reasons.push('Bollinger Band squeeze — breakout momentum building');
@@ -860,7 +928,7 @@ export class DecisionEngine {
 
     const pixelPattern = obs.patternEvidence?.patterns?.at(-1);
     if (pixelPattern && pixelPattern.direction === (bullish ? 'BULLISH' : 'BEARISH')) {
-      if (!reasons.some((r) => r.includes('pattern detected'))) {
+      if (!reasons.some((reason) => reason.includes('pattern detected'))) {
         reasons.push(`${pixelPattern.name} pattern confirms the ${dir.toLowerCase()} setup`);
       }
     }
@@ -889,7 +957,7 @@ export class DecisionEngine {
     expiry: string | null,
     dataQuality: QualityLevel,
     timestamp: number,
-    obsId?: string
+    obsId?: string,
   ): RawDecisionResult {
     return {
       observationId: obsId,

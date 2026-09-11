@@ -6,10 +6,11 @@ import { CalibrationDatasetManager } from '../electron/main/brain/CalibrationDat
 import { Database } from '../electron/main/database/Database';
 import { TradeRepository } from '../electron/main/database/repositories/TradeRepository';
 import { TradingAction, TradeOutcome } from '../shared/types/decision';
+import { PlatformMode } from '../shared/types/canonical';
 import * as fs from 'fs';
 import * as path from 'path';
 
-describe('MARS PRO V3 — Production Hardening & Release Certification (Sprint T6)', () => {
+describe('MARS PRO V3 — Production hardening', () => {
   let db: Database;
   let tradeRepo: TradeRepository;
   let tradeManager: RunningTradeManager;
@@ -19,130 +20,94 @@ describe('MARS PRO V3 — Production Hardening & Release Certification (Sprint T
   const testDbPath = path.join(__dirname, 'test-t6-hardening.db');
 
   beforeEach(async () => {
-    if (fs.existsSync(testDbPath)) {
-      try { fs.unlinkSync(testDbPath); } catch {}
-    }
+    if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath);
     db = new Database(testDbPath);
     await db.initialize();
-
     tradeRepo = new TradeRepository(db);
-
     tradeManager = RunningTradeManager.getInstance();
     tradeManager.clearAll();
     tradeManager.setRepository(tradeRepo);
-
     perfEngine = PerformanceEngine.getInstance();
     perfEngine.setDatabase(db);
-
     analyticsEngine = AnalyticsEngine.getInstance();
     analyticsEngine.setDatabase(db);
-
     calibrationManager = CalibrationDatasetManager.getInstance();
     calibrationManager.setDatabase(db);
   });
 
   afterEach(() => {
-    if (tradeManager) tradeManager.clearAll();
-    if (db) db.close();
-    if (fs.existsSync(testDbPath)) {
-      try { fs.unlinkSync(testDbPath); } catch {}
-    }
+    tradeManager.clearAll();
+    db.close();
+    if (fs.existsSync(testDbPath)) fs.unlinkSync(testDbPath);
   });
 
-  it('Task T6.5: Trade Stress Test — 1,000 rapid entries and outcome resolutions with zero collisions', () => {
+  it('tracks 1,000 rapid entries and outcomes with zero collisions', () => {
     const totalTrades = 1000;
     const startMemory = process.memoryUsage().heapUsed;
-
-    for (let i = 1; i <= totalTrades; i++) {
-      const action = i % 2 === 0 ? TradingAction.BUY : TradingAction.SELL;
-      const asset = i % 3 === 0 ? 'EUR/USD' : i % 3 === 1 ? 'GBP/USD' : 'BTC/USD';
-      const eventId = `stress-t6-${i}`;
-
-      const t = tradeManager.registerTrade({
+    for (let index = 1; index <= totalTrades; index += 1) {
+      const trade = tradeManager.registerTrade({
         sessionId: 'session-stress',
-        asset,
-        direction: action,
+        asset: index % 3 === 0 ? 'EUR/USD' : index % 3 === 1 ? 'GBP/USD' : 'BTC/USD',
+        direction: index % 2 === 0 ? TradingAction.BUY : TradingAction.SELL,
         expirySeconds: 60,
-        eventId,
+        eventId: `stress-t6-${index}`,
       });
-
-      expect(t).not.toBeNull();
-      const outcome = i % 4 === 0 ? TradeOutcome.LOSS : TradeOutcome.WIN;
-      tradeManager.resolveTradeOutcome(t!.id, outcome, '1.1000');
+      expect(trade).not.toBeNull();
+      tradeManager.resolveTradeOutcome(
+        trade!.id,
+        index % 4 === 0 ? TradeOutcome.LOSS : TradeOutcome.WIN,
+        '1.1000',
+      );
     }
-
-    const endMemory = process.memoryUsage().heapUsed;
-    const heapDiffMb = (endMemory - startMemory) / (1024 * 1024);
-
+    const heapDiffMb = (process.memoryUsage().heapUsed - startMemory) / (1024 * 1024);
     const stats = perfEngine.getPerformanceStats('session-stress');
     expect(stats.totalCompleted).toBe(totalTrades);
     expect(stats.allTimeWins + stats.allTimeLosses).toBe(totalTrades);
-
-    // Memory growth must remain under 15MB for 1000 full lifecycle trades
     expect(heapDiffMb).toBeLessThan(15);
   }, 60000);
 
-  it('Task T6.6: Database Crash Recovery & Transaction Integrity under stress', () => {
-    // Perform bulk transaction write
+  it('keeps 100 verified LIVE records consistent under one bulk transaction', () => {
     db.transaction(() => {
-      for (let i = 1; i <= 100; i++) {
-        const t = tradeManager.registerTrade({
-          sessionId: 'crash-session',
-          asset: 'EUR/USD',
-          direction: TradingAction.BUY,
-          eventId: `crash-${i}`,
+      for (let index = 1; index <= 100; index += 1) {
+        const trade = tradeManager.registerTrade({
+          sessionId: 'crash-session', asset: 'EUR/USD', direction: TradingAction.BUY,
+          eventId: `crash-${index}`, entryPrice: '1.1000', platformMode: PlatformMode.LIVE,
         });
-        tradeManager.resolveTradeOutcome(t!.id, TradeOutcome.WIN);
+        expect(trade).not.toBeNull();
+        expect(tradeManager.resolveTradeOutcome(trade!.id, TradeOutcome.WIN, '1.1010')).toBe(true);
       }
     });
-
-    const snapshots = calibrationManager.getCalibrationObservations();
-    expect(snapshots.length).toBe(100);
-
+    expect(calibrationManager.getCalibrationObservations()).toHaveLength(100);
     const validation = analyticsEngine.validateRuntimeIntegrity();
     expect(validation.isValid).toBe(true);
     expect(validation.corruptRecordsCount).toBe(0);
   });
 
-  it('Task T6.7: Full System Runtime Validation Audit', () => {
-    // Generate valid completed trade
-    const t1 = tradeManager.registerTrade({
-      sessionId: 'audit-session',
-      asset: 'EUR/USD',
-      direction: TradingAction.BUY,
-      eventId: 'audit-1',
+  it('passes full runtime validation for a completed record', () => {
+    const trade = tradeManager.registerTrade({
+      sessionId: 'audit-session', asset: 'EUR/USD', direction: TradingAction.BUY,
+      eventId: 'audit-1', entryPrice: '1.0940', platformMode: PlatformMode.LIVE,
     });
-    tradeManager.resolveTradeOutcome(t1!.id, TradeOutcome.WIN, '1.0950');
-
+    tradeManager.resolveTradeOutcome(trade!.id, TradeOutcome.WIN, '1.0950');
     const report = analyticsEngine.validateRuntimeIntegrity();
     expect(report.isValid).toBe(true);
-    expect(report.errors.length).toBe(0);
+    expect(report.errors).toHaveLength(0);
     expect(report.totalRecordsChecked).toBeGreaterThan(0);
   });
 
-  it('Task T6.11: 1,000 Decision & Trade Cycles Memory Stability Test', () => {
+  it('builds 1,000 immutable snapshots within memory budget', () => {
     const memoryBefore = process.memoryUsage().heapUsed;
-
-    for (let i = 0; i < 1000; i++) {
-      const snap = calibrationManager.buildSnapshot({
-        id: `snap-${i}`,
-        sessionId: 'mem-session',
-        asset: 'EUR/USD',
-        direction: TradingAction.BUY,
-        entryTimestamp: Date.now() - 60000,
-        expirySeconds: 60,
-        completionTimestamp: Date.now(),
-        result: TradeOutcome.WIN,
-        confidence: 0.85,
+    for (let index = 0; index < 1000; index += 1) {
+      const snapshot = calibrationManager.buildSnapshot({
+        id: `snap-${index}`, sessionId: 'mem-session', asset: 'EUR/USD',
+        direction: TradingAction.BUY, entryTimestamp: Date.now() - 60_000,
+        expirySeconds: 60, completionTimestamp: Date.now(), result: TradeOutcome.WIN,
+        platformMode: PlatformMode.LIVE, confidence: 0.85,
         reasons: ['RSI oversold', 'EMA confluence'],
       });
-      expect(snap.tradeId).toBe(`snap-${i}`);
+      expect(snapshot.tradeId).toBe(`snap-${index}`);
     }
-
-    const memoryAfter = process.memoryUsage().heapUsed;
-    const memoryGrowthMb = (memoryAfter - memoryBefore) / (1024 * 1024);
-
-    // 1000 snapshot builds in memory must consume less than 10MB
-    expect(memoryGrowthMb).toBeLessThan(10);
+    const growthMb = (process.memoryUsage().heapUsed - memoryBefore) / (1024 * 1024);
+    expect(growthMb).toBeLessThan(10);
   }, 60000);
 });

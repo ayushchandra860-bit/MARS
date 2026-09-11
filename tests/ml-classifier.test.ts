@@ -1,174 +1,124 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { MLEngine, FEATURE_NAMES, ReadinessState } from '../electron/main/decision/MLEngine';
+import { MLEngine, FEATURE_NAMES } from '../electron/main/decision/MLEngine';
 import { MarketObservation } from '../shared/types/observation';
 import { OHLC } from '../electron/main/market/QuantitativeEngine';
+import { TradingAction } from '../shared/types/decision';
 
-const makeObservation = (overrides: Partial<MarketObservation> = {}): MarketObservation =>
-  ({
-    id: 'obs-1',
-    asset: 'EUR/USD',
-    timeframe: '1M',
-    timestamp: Date.now(),
-    currentPrice: 1.095,
-    candles: [],
-    patternEvidence: { detectedPatterns: [], patternConfidence: 0 },
-    trendEvidence: { direction: 'BULLISH', confidence: 0.8, consecutive: 4, quality: 'STRONG' },
-    momentumEvidence: { level: 'STRONG', direction: 'UP' },
-    structureEvidence: { structure: 'HIGHER_HIGHS', confidence: 0.75, quality: 'GOOD' },
-    supportResistanceEvidence: { nearestSupport: 1.094, nearestResistance: 1.097, strength: 0.7 },
-    volatilityEvidence: { level: 'NORMAL', atr: 0.001, spike: false },
-    quantitativeMetrics: {
-      rsi: { value: 45, isOversold: false, isOverbought: false },
-      bollingerBands: { percentB: 0.5, isSqueeze: false, width: 0.002 },
-      macd: { signal: 'NEUTRAL', direction: 'UP' },
-      fibonacciLevels: { levels: [], nearest: null },
-      atrNormalized: 0.5,
-      candleQualityScore: 0.9,
-    },
-    ...overrides,
-  }) as MarketObservation;
+const makeObservation = (overrides: Partial<MarketObservation> = {}): MarketObservation => ({
+  id: 'obs-1', asset: 'EUR/USD', timeframe: '1M', timestamp: Date.now(), currentPrice: 1.095, candles: [],
+  patternEvidence: { detectedPatterns: [], patternConfidence: 0 },
+  trendEvidence: { direction: 'BULLISH', confidence: 0.8, consecutive: 4, quality: 'STRONG' },
+  momentumEvidence: { level: 'STRONG', direction: 'UP' },
+  structureEvidence: { structure: 'HIGHER_HIGHS', confidence: 0.75, quality: 'GOOD' },
+  supportResistanceEvidence: { nearestSupport: 1.094, nearestResistance: 1.097, strength: 0.7 },
+  volatilityEvidence: { level: 'NORMAL', atr: 0.001, spike: false },
+  quantitativeMetrics: {
+    rsi: { value: 45, isOversold: false, isOverbought: false },
+    bollingerBands: { percentB: 0.5, isSqueeze: false, width: 0.002 },
+    macd: { signal: 'NEUTRAL', direction: 'UP' }, fibonacciLevels: { levels: [], nearest: null },
+    atrNormalized: 0.5, candleQualityScore: 0.9,
+  }, ...overrides,
+}) as MarketObservation;
+const makeCandles = (bullish = true): OHLC[] => Array.from({ length: 12 }, (_, index) => {
+  const base = 1.09 + index * 0.0005;
+  return { open: base, high: base + 0.002, low: base - 0.002,
+    close: base + (bullish ? 0.001 : -0.001), timestamp: Date.now() - (12 - index) * 60_000 };
+});
+const buyWin = { features: [0.45, 0, 0, 0.5, 0, 0, 0, 1, 0, 0.7, 0], label: 1 as const, action: TradingAction.BUY };
+const buyLoss = { features: [0.72, 0, 1, 0.9, 0, 1, 0, 0, 1, 0.3, 1], label: -1 as const, action: TradingAction.BUY };
 
-const makeCandles = (n = 12): OHLC[] => {
-  const out: OHLC[] = [];
-  for (let i = 0; i < n; i++) {
-    out.push({
-      open: 1.09 + i * 0.0005,
-      high: 1.091 + i * 0.0005,
-      low: 1.089 + i * 0.0005,
-      close: 1.09 + i * 0.001,
-      timestamp: Date.now() - (n - i) * 60_000,
-    });
-  }
-  return out;
-};
+describe('ML Engine action probability policy', () => {
+  beforeEach(() => MLEngine.getInstance().reset());
 
-describe('ML Engine — Real Trained Classifier', () => {
-  beforeEach(() => {
-    MLEngine.getInstance().reset();
+  it('is DORMANT with zero influence and explicit probability semantics', () => {
+    const result = MLEngine.getInstance().evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
+    expect(result).toMatchObject({ readiness: 'DORMANT', sampleSize: 0, confidenceBoost: 0,
+      modelApplied: false, probabilityMeaning: 'ACTION_WIN_PROBABILITY', probabilityScale: 'RATIO_0_1' });
   });
 
-  it('starts DORMANT with zero samples and applies no confidence boost', () => {
-    const result = MLEngine.getInstance().evaluateWinProbability(makeObservation(), makeCandles());
-    expect(result.readiness).toBe('DORMANT');
-    expect(result.sampleSize).toBe(0);
-    expect(result.confidenceBoost).toBe(0);
-    // DORMANT: only heuristic factors, no ML boost; the learning hint appears when
-    // no heuristic pillars fired. Accept either signal of dormant honesty.
-    const hasLearningNote = result.keyFactors.some((f) => f.includes('Awaiting training data') || f.includes('ML'));
-    expect(hasLearningNote || result.readiness === 'DORMANT').toBe(true);
-  });
-
-  it('reports TRAINING readiness between 30 and 99 samples', () => {
+  it('never blends a DORMANT model even when a classifier exists', () => {
     const ml = MLEngine.getInstance();
-    const example = {
-      features: new Array(FEATURE_NAMES.length).fill(0.5),
-      label: 1 as const,
-    };
-    for (let i = 0; i < 50; i++) ml.ingestLabeledExamples([example]);
-    expect(ml.getReadiness()).toBe('TRAINING');
-    expect(ml.getSampleCount()).toBe(50);
+    const baseline = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles()).probability;
+    for (let i = 0; i < 10; i++) ml.ingestLabeledExamples([buyWin, buyLoss]);
+    const after = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
+    expect(after.readiness).toBe('DORMANT');
+    expect(after.modelApplied).toBe(false);
+    expect(ml.hasTrainedModel()).toBe(false);
+    expect(after.probability).toBe(baseline);
   });
 
-  it('reports READY readiness at 100+ labeled examples', () => {
+  it('does not claim READY by summing unrelated under-ready assets', () => {
     const ml = MLEngine.getInstance();
-    const example = { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 1 as const };
-    for (let i = 0; i < 120; i++) ml.ingestLabeledExamples([example]);
-    expect(ml.getReadiness()).toBe('READY');
-    expect(ml.getSampleCount()).toBe(120);
-  });
-
-  it('learned layer moves probability when trained on consistent patterns', () => {
-    const ml = MLEngine.getInstance();
-    // Win whenever trend is bullish with momentum (features[7]=1, features[9]>0.5)
-    const winEx = {
-      features: [0.45, 0, 0, 0.5, 0, 0, 0, 1, 0, 0.7, 0],
-      label: 1 as const,
-    };
-    const loseEx = {
-      features: [0.72, 0, 0, 0.5, 0, 0, 0, 0, 1, 0.3, 0],
-      label: -1 as const,
-    };
-    for (let i = 0; i < 150; i++) {
-      ml.ingestLabeledExamples([winEx, loseEx]);
+    for (let i = 0; i < 30; i++) {
+      ml.ingestLabeledExamples([{ ...buyWin, asset: 'EUR/USD' }, { ...buyLoss, asset: 'EUR/USD' },
+        { ...buyWin, asset: 'Gold' }, { ...buyLoss, asset: 'Gold' }]);
     }
-    expect(ml.getReadiness()).toBe('READY');
-
-    const bullObs = makeObservation({
-      trendEvidence: { direction: 'BULLISH', confidence: 0.8, consecutive: 4, quality: 'STRONG' } as any,
-    });
-    const bearObs = makeObservation({
-      trendEvidence: { direction: 'BEARISH', confidence: 0.8, consecutive: 4, quality: 'STRONG' } as any,
-    });
-    const candles = makeCandles();
-    const bullResult = ml.evaluateWinProbability(bullObs, candles);
-    const bearResult = ml.evaluateWinProbability(bearObs, candles);
-    // Bullish alignment should be judged more favorably than bearish after training
-    expect(bullResult.probability).toBeGreaterThan(bearResult.probability);
-    expect(bullResult.sampleSize).toBe(300);
+    expect(ml.getSampleCount()).toBe(120);
+    expect(ml.getSampleCount('EUR/USD')).toBe(60);
+    expect(ml.getSampleCount('Gold')).toBe(60);
+    expect(ml.getReadiness()).toBe('TRAINING');
   });
 
-  it('rejects malformed examples silently', () => {
+  it('reports READY per asset and applies only a model that passes holdout quality', () => {
+    const ml = MLEngine.getInstance();
+    for (let i = 0; i < 80; i++) ml.ingestLabeledExamples([{ ...buyWin, asset: 'EUR/USD' }, { ...buyLoss, asset: 'EUR/USD' }]);
+    const result = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
+    expect(ml.getReadiness('EUR/USD')).toBe('READY');
+    expect(ml.hasTrainedModel('EUR/USD')).toBe(true);
+    expect(result.validationPassed).toBe(true);
+    expect(result.modelApplied).toBe(true);
+    expect(result.sampleSize).toBe(160);
+  });
+
+  it('same market state has direction-specific meaning', () => {
+    const ml = MLEngine.getInstance();
+    const raw = [0.35, 1, 0, 0.05, 1, 0, 0, 1, 0, 0.8, 0];
+    for (let i = 0; i < 100; i++) {
+      ml.ingestLabeledExamples([
+        { features: raw, label: 1, action: TradingAction.BUY, asset: 'EUR/USD' },
+        { features: raw, label: -1, action: TradingAction.SELL, asset: 'EUR/USD' },
+      ]);
+    }
+    const observation = makeObservation({
+      quantitativeMetrics: { ...(makeObservation().quantitativeMetrics as any),
+        rsi: { value: 25, isOversold: true, isOverbought: false },
+        bollingerBands: { percentB: 0.03, isSqueeze: false, width: 0.002 } } as any,
+    });
+    const buy = ml.evaluateWinProbability(observation, TradingAction.BUY, makeCandles(true));
+    const sell = ml.evaluateWinProbability(observation, TradingAction.SELL, makeCandles(true));
+    expect(buy.probability).toBeGreaterThan(sell.probability);
+  });
+
+  it('keeps a contradictory high-sample model in TRAINING with no influence', () => {
+    const ml = MLEngine.getInstance();
+    const same = new Array(FEATURE_NAMES.length).fill(0.5);
+    for (let i = 0; i < 80; i++) {
+      ml.ingestLabeledExamples([
+        { features: same, label: i % 2 === 0 ? 1 : -1, action: TradingAction.BUY, asset: 'EUR/USD' },
+        { features: same, label: i % 2 === 0 ? -1 : 1, action: TradingAction.BUY, asset: 'EUR/USD' },
+      ]);
+    }
+    const result = ml.evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
+    expect(result.readiness).toBe('TRAINING');
+    expect(result.validationPassed).toBe(false);
+    expect(result.modelApplied).toBe(false);
+    expect(result.confidenceBoost).toBe(0);
+    expect(ml.hasTrainedModel('EUR/USD')).toBe(false);
+  });
+
+  it('rejects examples without action provenance', () => {
     const ml = MLEngine.getInstance();
     ml.ingestLabeledExamples([
-      { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 1 as const },
-      { features: [0.1], label: 1 as const } as any,
-      { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 0 as const } as any,
-      null as any,
+      { ...buyWin },
+      { features: [0.1], label: 1, action: TradingAction.BUY } as any,
+      { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 1 } as any,
     ]);
     expect(ml.getSampleCount()).toBe(1);
   });
 
-  it('probability stays within safe bounds', () => {
-    const ml = MLEngine.getInstance();
-    const example = { features: new Array(FEATURE_NAMES.length).fill(0.5), label: 1 as const };
-    for (let i = 0; i < 200; i++) ml.ingestLabeledExamples([example]);
-    const result = ml.evaluateWinProbability(makeObservation(), makeCandles());
+  it('keeps probabilities inside the documented ratio range', () => {
+    const result = MLEngine.getInstance().evaluateWinProbability(makeObservation(), TradingAction.BUY, makeCandles());
     expect(result.probability).toBeGreaterThanOrEqual(0.1);
-    expect(result.probability).toBeLessThanOrEqual(0.96);
-  });
-
-  it('trains per-asset models separately from the global fallback', () => {
-    const ml = MLEngine.getInstance();
-    // EUR/USD: bullish trend wins; Gold: bearish trend wins (opposite signals).
-    const bullWin = { features: [0.45, 0, 0, 0.5, 0, 0, 0, 1, 0, 0.7, 0], label: 1 as const, asset: 'EUR/USD' };
-    const bullLose = { features: [0.45, 0, 0, 0.5, 0, 0, 0, 1, 0, 0.7, 0], label: -1 as const, asset: 'Gold' };
-    const bearWin = { features: [0.45, 0, 0, 0.5, 0, 0, 0, 0, 1, 0.7, 0], label: 1 as const, asset: 'Gold' };
-    const bearLose = { features: [0.45, 0, 0, 0.5, 0, 0, 0, 0, 1, 0.7, 0], label: -1 as const, asset: 'EUR/USD' };
-    for (let i = 0; i < 120; i++) {
-      ml.ingestLabeledExamples([bullWin, bullLose, bearWin, bearLose]);
-    }
-    expect(ml.getSampleCount('EUR/USD')).toBe(240);
-    expect(ml.getSampleCount('Gold')).toBe(240);
-
-    const bullObs = makeObservation({ asset: 'EUR/USD', trendEvidence: { direction: 'BULLISH', confidence: 0.8, consecutive: 4, quality: 'STRONG' } as any });
-    const goldBearObs = makeObservation({ asset: 'Gold', trendEvidence: { direction: 'BEARISH', confidence: 0.8, consecutive: 4, quality: 'STRONG' } as any });
-    const candles = makeCandles();
-
-    const eurBull = ml.evaluateWinProbability(bullObs, candles);
-    const goldBear = ml.evaluateWinProbability(goldBearObs, candles);
-
-    // EUR/USD model learned bullish = win; Gold model learned bearish = win.
-    // Both should end up above the neutral 0.5 baseline.
-    expect(eurBull.probability).toBeGreaterThan(0.5);
-    expect(goldBear.probability).toBeGreaterThan(0.5);
-  });
-
-  it('walk-forward validation reports honest out-of-sample accuracy', () => {
-    const ml = MLEngine.getInstance();
-    const winEx = { features: [0.45, 0, 0, 0.5, 0, 0, 0, 1, 0, 0.7, 0], label: 1 as const };
-    const loseEx = { features: [0.72, 0, 0, 0.5, 0, 0, 0, 0, 1, 0.3, 0], label: -1 as const };
-    // Enough examples to trigger several retrains with a meaningful holdout.
-    for (let i = 0; i < 200; i++) ml.ingestLabeledExamples([winEx, loseEx]);
-
-    const report = ml.getValidationReport();
-    expect(report.length).toBeGreaterThan(0);
-    const latest = report[report.length - 1];
-    expect(latest.validationSize).toBeGreaterThanOrEqual(5);
-    expect(latest.trainSize).toBeGreaterThan(0);
-    expect(latest.accuracy).toBeGreaterThanOrEqual(0);
-    expect(latest.accuracy).toBeLessThanOrEqual(1);
-    expect(latest.balancedAccuracy).toBeGreaterThanOrEqual(0);
-    expect(latest.balancedAccuracy).toBeLessThanOrEqual(1);
-    expect(latest.timestamp).toBeGreaterThan(0);
+    expect(result.probability).toBeLessThanOrEqual(0.9);
   });
 });

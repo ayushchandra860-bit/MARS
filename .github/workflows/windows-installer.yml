@@ -1,0 +1,206 @@
+name: Windows Installer
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the verified build as a GitHub prerelease
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Release tag when publishing
+        required: true
+        type: string
+        default: v3.0.1-rc.1
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - .github/release/v3.0.1-rc.1
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-windows:
+    name: Build Windows x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-logs | Out-Null
+          & npm ci 2>&1 | Tee-Object -FilePath ci-logs/npm-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Clean generated output
+        shell: pwsh
+        run: |
+          & npm run clean:build 2>&1 | Tee-Object -FilePath ci-logs/clean.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit IPC contracts
+        shell: pwsh
+        run: |
+          & npm run verify:ipc 2>&1 | Tee-Object -FilePath ci-logs/ipc-audit.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Typecheck Electron and frontend
+        shell: pwsh
+        run: |
+          & npm run typecheck 2>&1 | Tee-Object -FilePath ci-logs/typecheck.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run Vitest suite on Windows
+        shell: pwsh
+        run: |
+          & npm run test 2>&1 | Tee-Object -FilePath ci-logs/vitest.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build production bundles
+        shell: pwsh
+        run: |
+          & npm run build 2>&1 | Tee-Object -FilePath ci-logs/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify production bundle structure
+        shell: pwsh
+        run: |
+          & npm run verify:build 2>&1 | Tee-Object -FilePath ci-logs/build-verification.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package NSIS and portable x64 apps
+        shell: pwsh
+        run: |
+          & npm exec electron-builder -- --win --x64 2>&1 | Tee-Object -FilePath ci-logs/electron-builder.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Path release -Filter *.exe -File)
+          if ($files.Count -eq 0) { throw 'No Windows executables were produced.' }
+          $lines = $files | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Encoding utf8 release/SHA256SUMS.txt
+          Get-ChildItem release
+
+      - name: Publish reusable Windows failure diagnostic
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const marker = '<!-- mars-windows-failure -->';
+            const directory = path.join(process.env.GITHUB_WORKSPACE, 'ci-logs');
+            const names = fs.existsSync(directory)
+              ? fs.readdirSync(directory).filter((name) => name.endsWith('.log')).sort()
+              : [];
+            const sections = names.map((name) => {
+              const text = fs.readFileSync(path.join(directory, name), 'utf8');
+              const lines = text.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).slice(-120);
+              return `#### ${name}\n\n\`\`\`text\n${lines.join('\n').slice(-12000)}\n\`\`\``;
+            });
+            const body = `${marker}\n### Windows installer failure diagnostic\n\nHead: \`${context.sha}\`\n\n${sections.join('\n\n').slice(-50000) || 'No stage log was produced.'}`;
+            const issueNumber = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) => comment.user?.type === 'Bot' && comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: issueNumber, body });
+            }
+
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MARS-Windows-CI-logs-${{ github.run_number }}
+          path: ci-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload downloadable Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: MARS-PRO-V3-Windows-${{ github.run_number }}
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish guarded GitHub prerelease
+        if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseTag = if ('${{ github.ref }}'.StartsWith('refs/tags/v')) {
+            '${{ github.ref_name }}'
+          } elseif ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            '${{ inputs.release_tag }}'
+          } else {
+            'v3.0.1-rc.1'
+          }
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ("v$($package.version)" -ne $releaseTag) {
+            throw "Package version $($package.version) does not match release tag $releaseTag."
+          }
+          if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref }}' -eq 'refs/heads/main') {
+            $marker = (Get-Content .github/release/v3.0.1-rc.1 -Raw).Trim()
+            if ($marker -ne $releaseTag) { throw 'Release marker does not match the guarded tag.' }
+          }
+          $files = @(Get-ChildItem -Path release -File | Where-Object {
+            $_.Extension -eq '.exe' -or $_.Name -eq 'SHA256SUMS.txt'
+          })
+          if ($files.Count -lt 3) { throw 'Installer, portable app, or checksums are missing.' }
+          $paths = $files | ForEach-Object { $_.FullName }
+          @"
+          MARS PRO V3 Fixed Version 1 release candidate.
+
+          This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
+          It is decision-support software, not a profit guarantee. Use DEMO mode first and validate with your own risk limits.
+          "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
+          gh release view $releaseTag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $releaseTag @paths --clobber
+            gh release edit $releaseTag --title "MARS PRO V3 $releaseTag" --notes-file release/RELEASE_NOTES.md --prerelease
+          } else {
+            gh release create $releaseTag @paths --target "$env:GITHUB_SHA" --title "MARS PRO V3 $releaseTag" --notes-file release/RELEASE_NOTES.md --prerelease
+          }

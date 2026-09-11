@@ -5,7 +5,7 @@
 
 import { SessionId, FrameId, QualityLevel } from './scanner';
 import { MarketBias, MarketRegime } from './market';
-import { CanonicalConfidence, CanonicalRisk, AnalysisMode } from './canonical';
+import { CanonicalConfidence, CanonicalRisk, AnalysisMode, PlatformMode } from './canonical';
 
 export enum TradingAction {
   BUY = 'BUY',
@@ -38,7 +38,6 @@ export enum WaitReason {
   DEMO_ACCOUNT_BLOCKED = 'Demo account blocked from live signal generation',
 }
 
-/** Signal lifecycle states — every confirmed signal progresses through these */
 export enum SignalLifecycle {
   WATCHING = 'WATCHING',
   FORMING = 'FORMING',
@@ -50,7 +49,6 @@ export enum SignalLifecycle {
   INVALIDATED = 'INVALIDATED',
 }
 
-/** Internal backend TradeHealth state to govern lifecycle transitions */
 export enum TradeHealth {
   HEALTHY = 'HEALTHY',
   WEAKENING = 'WEAKENING',
@@ -58,16 +56,12 @@ export enum TradeHealth {
   INVALID = 'INVALID',
 }
 
-/** Explicit Signal Status and Trade Status */
 export type SignalStatusState = 'WAIT' | 'BUY SIGNAL ACTIVE' | 'SELL SIGNAL ACTIVE';
 export type TradeStatusState = 'NO TRADE' | 'ENTRY WINDOW' | 'TRADE ACTIVE' | 'TRADE INVALIDATED' | 'TRADE COMPLETED';
 export type SignalStatusLabel = SignalStatusState;
 export type TradeStatusLabel = TradeStatusState;
-
-/** Calibration Modes (Supports both new AnalysisMode and legacy names for seamless compatibility) */
 export type CalibrationMode = AnalysisMode | 'SAFE' | 'BALANCED' | 'COMPREHENSIVE' | 'SNIPER' | 'AGGRESSIVE';
 
-/** Strict Trade State Machine Lifecycle */
 export enum TradeState {
   WAITING = 'WAITING',
   ENTRY_DETECTED = 'ENTRY_DETECTED',
@@ -79,7 +73,6 @@ export enum TradeState {
   ARCHIVED = 'ARCHIVED',
 }
 
-/** Multi-trade support authoritative trade record */
 export interface AuthoritativeTradeRecord {
   id: string;
   observationId?: string;
@@ -102,11 +95,11 @@ export interface AuthoritativeTradeRecord {
   reasons?: string[];
   timeframe?: string | null;
   regime?: string | null;
+  platformMode?: PlatformMode;
   /** Immutable normalized features captured at entry for post-trade learning. */
   mlFeatures?: number[];
 }
 
-/** Backend-only explanation object for internal analytics */
 export interface TradeExplanation {
   trend: string;
   momentum: string;
@@ -130,23 +123,11 @@ export interface RawDecisionResult {
   timestamp: number;
 }
 
-export interface StabilizedDecision {
-  observationId?: string;
-  action: TradingAction;
-  reason: string;
-  reasons: string[];
-  signalStrength: number;
-  confidence: CanonicalConfidence;
-  risk: CanonicalRisk;
-  marketBias: MarketBias;
-  recommendedExpiry: string | null;
-  dataQuality: QualityLevel;
+export interface StabilizedDecision extends RawDecisionResult {
   frameConsistency: number;
   wasStabilized: boolean;
-  timestamp: number;
 }
 
-/** Enriched stabilized decision with lifecycle and regime context */
 export interface EnrichedDecision extends StabilizedDecision {
   lifecycle: SignalLifecycle;
   marketRegime: MarketRegime;

@@ -1,7 +1,5 @@
 // ============================================================
 // MARS PRO V3 — Canonical Data Quality Gate
-// Evaluates market observation quality, freshness, and demo isolation
-// before allowing data to enter the intelligence and decision pipeline.
 // ============================================================
 
 import { MarketObservation } from '../../../shared/types/observation';
@@ -10,7 +8,6 @@ import {
   PlatformMode,
   DataFreshness,
   QualityGateRejection,
-  QualityGateResult,
   computeFreshness,
   isValidAssetName,
   FRESHNESS_THRESHOLDS,
@@ -30,10 +27,8 @@ export class DataQualityGate {
   public static readonly MIN_AVG_CANDLE_QUALITY = 0.65;
   public static readonly MAX_OBSERVATION_AGE_MS = FRESHNESS_THRESHOLDS.STALE_MAX_AGE_MS;
 
-  /**
-   * Evaluates observation against strict data quality and safety standards.
-   */
-  public evaluate(obs: MarketObservation, allowDemo: boolean = true): QualityGateEvaluationResult {
+  /** Demo data is isolated by default; callers must explicitly opt in. */
+  public evaluate(obs: MarketObservation, allowDemo: boolean = false): QualityGateEvaluationResult {
     if (!obs) {
       return {
         passed: false,
@@ -45,7 +40,6 @@ export class DataQualityGate {
       };
     }
 
-    // 1. Platform Mode Check — Demo Isolation
     const platformMode = obs.platformMode ?? PlatformMode.UNKNOWN;
     if (!allowDemo && platformMode === PlatformMode.DEMO) {
       return {
@@ -54,11 +48,10 @@ export class DataQualityGate {
         rejection: QualityGateRejection.DEMO_MODE,
         detail: 'Demo account observations are isolated from live signal generation',
         freshness: computeFreshness(obs.timestamp),
-        platformMode: PlatformMode.DEMO,
+        platformMode,
       };
     }
 
-    // 2. Data Freshness Check
     const freshness = obs.freshness ?? computeFreshness(obs.timestamp);
     if (freshness === DataFreshness.EXPIRED) {
       return {
@@ -66,12 +59,11 @@ export class DataQualityGate {
         reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
         rejection: QualityGateRejection.EXPIRED_DATA,
         detail: `Observation timestamp is expired (${Date.now() - obs.timestamp}ms old)`,
-        freshness: DataFreshness.EXPIRED,
+        freshness,
         platformMode,
       };
     }
 
-    // 3. Asset Identity Validation
     if (!obs.asset || !isValidAssetName(obs.asset)) {
       return {
         passed: false,
@@ -83,7 +75,6 @@ export class DataQualityGate {
       };
     }
 
-    // 4. Candle Count & Integrity
     if (!obs.candles || obs.candles.length < DataQualityGate.MIN_CANDLES_FOR_SIGNAL) {
       return {
         passed: false,
@@ -95,7 +86,6 @@ export class DataQualityGate {
       };
     }
 
-    // 5. Candle & Capture Quality Levels
     if (obs.candleQuality === QualityLevel.FAILED) {
       return {
         passed: false,
@@ -129,31 +119,30 @@ export class DataQualityGate {
       };
     }
 
-    // 6. Average Candle Geometry Quality
-    const avgCandleQuality = obs.candles.reduce((sum, candle) => sum + (candle.quality || 0), 0) / obs.candles.length;
-    if (avgCandleQuality < DataQualityGate.MIN_AVG_CANDLE_QUALITY) {
+    const averageCandleQuality = obs.candles.reduce(
+      (sum, candle) => sum + (candle.quality || 0), 0,
+    ) / obs.candles.length;
+    if (averageCandleQuality < DataQualityGate.MIN_AVG_CANDLE_QUALITY) {
       return {
         passed: false,
         reason: FailureReasonCode.CANDLE_DETECTION_FAILED,
         rejection: QualityGateRejection.LOW_CANDLE_QUALITY,
-        detail: `Average candle quality (${avgCandleQuality.toFixed(2)}) is below threshold (${DataQualityGate.MIN_AVG_CANDLE_QUALITY})`,
+        detail: `Average candle quality (${averageCandleQuality.toFixed(2)}) is below threshold (${DataQualityGate.MIN_AVG_CANDLE_QUALITY})`,
         freshness,
         platformMode,
       };
     }
 
-    // 7. Price Anomaly / Sanity Check (if price is present)
-    if (obs.currentPrice !== null && obs.currentPrice !== undefined) {
-      if (!Number.isFinite(obs.currentPrice) || obs.currentPrice <= 0) {
-        return {
-          passed: false,
-          reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
-          rejection: QualityGateRejection.INVALID_PRICE,
-          detail: `Invalid price quote: ${obs.currentPrice}`,
-          freshness,
-          platformMode,
-        };
-      }
+    if (obs.currentPrice !== null && obs.currentPrice !== undefined
+      && (!Number.isFinite(obs.currentPrice) || obs.currentPrice <= 0)) {
+      return {
+        passed: false,
+        reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
+        rejection: QualityGateRejection.INVALID_PRICE,
+        detail: `Invalid price quote: ${obs.currentPrice}`,
+        freshness,
+        platformMode,
+      };
     }
 
     return {

@@ -45,15 +45,12 @@ describe('PerformanceEngine (Sprint T2)', () => {
   });
 
   it('Task T2.2: automatically updates Overall, BUY, and SELL win rates', () => {
-    // Trade 1: BUY WIN
     const t1 = tradeManager.registerTrade({ sessionId: 's1', asset: 'EUR/USD', direction: TradingAction.BUY, expirySeconds: 60, eventId: 't1' });
     tradeManager.resolveTradeOutcome(t1!.id, TradeOutcome.WIN, '1.1050');
 
-    // Trade 2: BUY LOSS
     const t2 = tradeManager.registerTrade({ sessionId: 's1', asset: 'EUR/USD', direction: TradingAction.BUY, expirySeconds: 60, eventId: 't2' });
     tradeManager.resolveTradeOutcome(t2!.id, TradeOutcome.LOSS, '1.1020');
 
-    // Trade 3: SELL WIN
     const t3 = tradeManager.registerTrade({ sessionId: 's1', asset: 'GBP/USD', direction: TradingAction.SELL, expirySeconds: 60, eventId: 't3' });
     tradeManager.resolveTradeOutcome(t3!.id, TradeOutcome.WIN, '1.2500');
 
@@ -68,7 +65,6 @@ describe('PerformanceEngine (Sprint T2)', () => {
 
   it('Task T2.3: calculates winning and losing streaks accurately', () => {
     const s = 'streak-session';
-    // 3 Wins in a row
     const t1 = tradeManager.registerTrade({ sessionId: s, asset: 'EUR/USD', direction: TradingAction.BUY, eventId: 's1' });
     tradeManager.resolveTradeOutcome(t1!.id, TradeOutcome.WIN);
 
@@ -82,7 +78,6 @@ describe('PerformanceEngine (Sprint T2)', () => {
     expect(stats.currentWinningStreak).toBe(3);
     expect(stats.maxWinningStreak).toBe(3);
 
-    // 1 Loss
     const t4 = tradeManager.registerTrade({ sessionId: s, asset: 'EUR/USD', direction: TradingAction.BUY, eventId: 's4' });
     tradeManager.resolveTradeOutcome(t4!.id, TradeOutcome.LOSS);
 
@@ -95,13 +90,11 @@ describe('PerformanceEngine (Sprint T2)', () => {
   it('Task T2.4: determines Best Asset and Worst Asset statistics', () => {
     const s = 'asset-session';
 
-    // EUR/USD: 2 Wins, 0 Losses (100% Win Rate)
     const e1 = tradeManager.registerTrade({ sessionId: s, asset: 'EUR/USD', direction: TradingAction.BUY, eventId: 'a1' });
     tradeManager.resolveTradeOutcome(e1!.id, TradeOutcome.WIN);
     const e2 = tradeManager.registerTrade({ sessionId: s, asset: 'EUR/USD', direction: TradingAction.BUY, eventId: 'a2' });
     tradeManager.resolveTradeOutcome(e2!.id, TradeOutcome.WIN);
 
-    // BTC/USD: 0 Wins, 2 Losses (0% Win Rate)
     const b1 = tradeManager.registerTrade({ sessionId: s, asset: 'BTC/USD', direction: TradingAction.SELL, eventId: 'a3' });
     tradeManager.resolveTradeOutcome(b1!.id, TradeOutcome.LOSS);
     const b2 = tradeManager.registerTrade({ sessionId: s, asset: 'BTC/USD', direction: TradingAction.SELL, eventId: 'a4' });
@@ -110,7 +103,6 @@ describe('PerformanceEngine (Sprint T2)', () => {
     const stats = performanceEngine.getPerformanceStats(s);
     expect(stats.bestAsset?.asset).toBe('EUR/USD');
     expect(stats.bestAsset?.winRate).toBe(100);
-
     expect(stats.worstAsset?.asset).toBe('BTC/USD');
     expect(stats.worstAsset?.winRate).toBe(0);
   });
@@ -123,16 +115,13 @@ describe('PerformanceEngine (Sprint T2)', () => {
     const t2 = tradeManager.registerTrade({ sessionId: s, asset: 'GBP/USD', direction: TradingAction.SELL, eventId: 'h2' });
     tradeManager.resolveTradeOutcome(t2!.id, TradeOutcome.LOSS);
 
-    // Query all history
     let history = performanceEngine.queryHistory({});
     expect(history.length).toBe(2);
 
-    // Filter by asset
     const eurHistory = performanceEngine.queryHistory({ asset: 'EUR/USD' });
     expect(eurHistory.length).toBe(1);
     expect(eurHistory[0].asset).toBe('EUR/USD');
 
-    // Delete single trade
     const deleted = performanceEngine.deleteTrade(t1!.id);
     expect(deleted).toBe(true);
 
@@ -140,7 +129,6 @@ describe('PerformanceEngine (Sprint T2)', () => {
     expect(history.length).toBe(1);
     expect(history[0].id).toBe(t2!.id);
 
-    // Clear all history
     const cleared = performanceEngine.clearAllHistory();
     expect(cleared).toBe(1);
     expect(performanceEngine.queryHistory({}).length).toBe(0);
@@ -148,31 +136,40 @@ describe('PerformanceEngine (Sprint T2)', () => {
 
   it('cleans orphan signal history rows from history management actions', () => {
     const signalId = 'sig-orphan-cleanup-test';
-    db.prepare(
-      `INSERT INTO signal_history (
-        id, session_id, frame_id, timestamp, asset, timeframe,
-        raw_decision, stabilized_decision, raw_reason, stabilized_reason,
-        signal_strength, risk, data_quality, market_bias, recommended_expiry, outcome
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      signalId,
-      'cleanup-session',
-      'frame-cleanup',
-      Date.now(),
-      'EUR/USD',
-      '1m',
-      'BUY',
-      'BUY',
-      'test',
-      'test',
-      0.8,
-      'LOW',
-      'HIGH',
-      'BULLISH',
-      '1 min',
-      null
-    );
 
+    // Simulate a legacy database created before FK enforcement. Keep this
+    // bypass scoped to fixture construction; runtime operations stay protected.
+    db.getDb().exec('PRAGMA foreign_keys = OFF;');
+    try {
+      db.prepare(
+        `INSERT INTO signal_history (
+          id, session_id, frame_id, timestamp, asset, timeframe,
+          raw_decision, stabilized_decision, raw_reason, stabilized_reason,
+          signal_strength, risk, data_quality, market_bias, recommended_expiry, outcome
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        signalId,
+        'cleanup-session',
+        'frame-cleanup',
+        Date.now(),
+        'EUR/USD',
+        '1m',
+        'BUY',
+        'BUY',
+        'test',
+        'test',
+        0.8,
+        'LOW',
+        'HIGH',
+        'BULLISH',
+        '1 min',
+        null
+      );
+    } finally {
+      db.getDb().exec('PRAGMA foreign_keys = ON;');
+    }
+
+    expect(db.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
     const deleted = performanceEngine.deleteTrade(signalId);
     expect(deleted).toBe(true);
 

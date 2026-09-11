@@ -1,32 +1,32 @@
 // ============================================================
-// MARS PRO V3 — Self-Learning Preparation & Dataset Quality Engine (Sprint T9)
-// Prepares verified, immutable learning dataset for future model optimization.
-// Validates 28 feature fields, auto-repairs data anomalies, runs trade replay verification,
-// and evaluates Model Readiness Score.
+// MARS PRO V3 — Verified self-learning dataset and quality audit
+// No fabricated assets, prices, confidence, labels, or market features.
 // ============================================================
 
 import { Database } from '../database/Database';
 import { TradingAction, TradeOutcome, RiskLevel } from '../../../shared/types/decision';
+import { APP_VERSION } from '../../../shared/version';
 
 export interface CompleteLearningRecord {
   tradeId: string;
   asset: string;
   direction: TradingAction;
-  entryPrice: number | null;
-  exitPrice: number | null;
+  entryPrice: number;
+  exitPrice: number;
   entryTime: number;
   exitTime: number;
   expirySeconds: number;
-  result: TradeOutcome;
-  confidence: number;
-  agreementScore: number;
-  overallStrength: number;
-  risk: RiskLevel;
-  trend: string;
-  structure: string;
-  momentum: string;
-  volatility: string;
-  marketRegime: string;
+  result: TradeOutcome.WIN | TradeOutcome.LOSS;
+  /** Canonical ratio scale, 0..1; null means unavailable. */
+  confidence: number | null;
+  agreementScore: number | null;
+  overallStrength: number | null;
+  risk: RiskLevel | null;
+  trend: string | null;
+  structure: string | null;
+  momentum: string | null;
+  volatility: string | null;
+  marketRegime: string | null;
   rsi: number | null;
   ema: number | null;
   bollinger: number | null;
@@ -34,13 +34,10 @@ export interface CompleteLearningRecord {
   support: number | null;
   resistance: number | null;
   reasons: string[];
+  mlFeatures: number[] | null;
   decisionTrace: string;
   outcomeTrace: string;
-  runtimeMetadata: {
-    sessionId: string;
-    version: string;
-    validatedAt: number;
-  };
+  runtimeMetadata: { sessionId: string; version: string; validatedAt: number };
 }
 
 export interface DataQualityAuditReport {
@@ -49,316 +46,231 @@ export interface DataQualityAuditReport {
   repairedRecordsCount: number;
   corruptRecordsCount: number;
   anomaliesDetected: {
-    duplicateIds: string[];
-    missingOutcomes: string[];
-    invalidTimestamps: string[];
-    impossibleConfidence: string[];
-    negativeDurations: string[];
-    invalidPrices: string[];
+    duplicateIds: string[]; missingOutcomes: string[]; invalidTimestamps: string[];
+    impossibleConfidence: string[]; negativeDurations: string[]; invalidPrices: string[];
     corruptSnapshots: string[];
   };
   repairedAt: number;
 }
 
 export interface ModelReadinessScore {
-  readinessScorePct: number;
-  datasetQualityPct: number;
-  featureCompletenessPct: number;
-  labelQualityPct: number;
-  noiseLevelPct: number;
-  missingValuesPct: number;
-  consistencyPct: number;
-  sampleCount: number;
+  readinessScorePct: number; datasetQualityPct: number; featureCompletenessPct: number;
+  labelQualityPct: number; noiseLevelPct: number; missingValuesPct: number;
+  consistencyPct: number; sampleCount: number;
   readinessStatus: 'EXCELLENT' | 'GOOD' | 'MODERATE' | 'INSUFFICIENT_SAMPLES';
   recommendations: string[];
 }
 
 export interface ReplayValidationResult {
-  tradeId: string;
-  asset: string;
-  direction: string;
-  matchedDecision: boolean;
-  matchedEntry: boolean;
-  matchedCountdown: boolean;
-  matchedExit: boolean;
-  matchedOutcome: boolean;
-  matchedStoredResult: boolean;
-  isValidReplay: boolean;
+  tradeId: string; asset: string; direction: string; matchedDecision: boolean;
+  matchedEntry: boolean; matchedCountdown: boolean; matchedExit: boolean;
+  matchedOutcome: boolean; matchedStoredResult: boolean; isValidReplay: boolean;
   validationError?: string;
+}
+
+function finitePositive(value: unknown): number | null {
+  const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+function canonicalConfidence(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  if (value <= 1) return value;
+  if (value <= 100) return value / 100;
+  return null;
+}
+
+function finiteRatio(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+
+function finiteValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 export class SelfLearningDatasetManager {
   private static instance: SelfLearningDatasetManager | null = null;
   private db: Database | null = null;
-
   private constructor() {}
 
   public static getInstance(): SelfLearningDatasetManager {
-    if (!SelfLearningDatasetManager.instance) {
-      SelfLearningDatasetManager.instance = new SelfLearningDatasetManager();
-    }
-    return SelfLearningDatasetManager.instance;
+    if (!this.instance) this.instance = new SelfLearningDatasetManager();
+    return this.instance;
   }
+  public setDatabase(db: Database): void { this.db = db; }
 
-  public setDatabase(db: Database): void {
-    this.db = db;
-  }
-
-  // ----------------------------------------------------------
-  // Task 1: Complete Feature Snapshot Validation
-  // ----------------------------------------------------------
   public getCompleteLearningRecords(): CompleteLearningRecord[] {
     if (!this.db) return [];
+    const rows = this.db.prepare(`SELECT t.* FROM tracked_trades t
+      LEFT JOIN signal_history s ON s.id = t.signal_id
+      WHERE t.status = 'COMPLETED' AND t.outcome IN ('WIN', 'LOSS')
+        AND t.platform_mode = 'LIVE' AND t.action IN ('BUY', 'SELL')
+        AND t.asset IS NOT NULL AND TRIM(t.asset) NOT IN ('', 'UNKNOWN', '▲', '▼')
+        AND t.signal_id IS NOT NULL
+        AND t.entry_price IS NOT NULL AND CAST(t.entry_price AS REAL) > 0
+        AND t.completion_price IS NOT NULL AND CAST(t.completion_price AS REAL) > 0
+        AND t.completion_timestamp IS NOT NULL AND t.completion_timestamp >= t.entry_timestamp
+        AND (s.id IS NOT NULL OR t.signal_id LIKE 'manual-%' OR t.signal_id LIKE 'trade-%' OR t.signal_id LIKE 'signal-%')
+      ORDER BY t.completion_timestamp ASC`).all() as any[];
 
-    const rows = this.db.prepare(
-      `SELECT * FROM tracked_trades
-       WHERE status = 'COMPLETED' AND outcome IS NOT NULL AND outcome != 'UNRESOLVED'
-       ORDER BY completion_timestamp ASC`
-    ).all() as Array<{
-      id: string;
-      session_id: string;
-      action: string;
-      asset: string | null;
-      expiry_seconds: number;
-      confidence: number;
-      entry_price: string | null;
-      completion_price: string | null;
-      entry_timestamp: number;
-      completion_timestamp: number | null;
-      outcome: string;
-      original_reasons: string | null;
-    }>;
+    const records: CompleteLearningRecord[] = [];
+    for (const row of rows) {
+      const entryPrice = finitePositive(row.entry_price);
+      const exitPrice = finitePositive(row.completion_price);
+      if (entryPrice === null || exitPrice === null) continue;
 
-    return rows.map(r => {
-      let extra: Record<string, any> = {};
+      let extra: Record<string, unknown> = {};
+      let reasons: string[] = [];
       try {
-        if (r.original_reasons && r.original_reasons.startsWith('{')) {
-          extra = JSON.parse(r.original_reasons);
+        const parsed = JSON.parse(row.original_reasons || '[]');
+        if (Array.isArray(parsed)) reasons = parsed.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()));
+        else if (parsed && typeof parsed === 'object') {
+          extra = parsed as Record<string, unknown>;
+          if (Array.isArray(extra.reasons)) reasons = extra.reasons.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()));
         }
       } catch {}
 
-      const entryPx = r.entry_price ? parseFloat(r.entry_price) : null;
-      const exitPx = r.completion_price ? parseFloat(r.completion_price) : null;
-      const exitTimestamp = r.completion_timestamp || (r.entry_timestamp + r.expiry_seconds * 1000);
+      let mlFeatures: number[] | null = null;
+      try {
+        const parsed = JSON.parse(row.ml_features || 'null');
+        if (Array.isArray(parsed) && parsed.length >= 11 && parsed.slice(0, 11).every((value) => typeof value === 'number' && Number.isFinite(value))) {
+          mlFeatures = parsed.slice(0, 11);
+        }
+      } catch {}
 
-      return {
-        tradeId: r.id,
-        asset: r.asset || 'EUR/USD',
-        direction: r.action as TradingAction,
-        entryPrice: entryPx && !isNaN(entryPx) ? entryPx : null,
-        exitPrice: exitPx && !isNaN(exitPx) ? exitPx : null,
-        entryTime: r.entry_timestamp,
-        exitTime: exitTimestamp,
-        expirySeconds: r.expiry_seconds,
-        result: r.outcome as TradeOutcome,
-        confidence: typeof r.confidence === 'number' ? r.confidence : 0.5,
-        agreementScore: extra.agreementScore ?? 0.5,
-        overallStrength: extra.overallStrength ?? 0.5,
-        risk: extra.risk || RiskLevel.MEDIUM,
-        trend: extra.trend || 'NEUTRAL',
-        structure: extra.structure || 'UNKNOWN',
-        momentum: extra.momentum || 'NEUTRAL',
-        volatility: extra.volatility || 'NORMAL',
-        marketRegime: extra.marketRegime || 'UNKNOWN',
-        rsi: extra.rsi ?? null,
-        ema: extra.ema ?? null,
-        bollinger: extra.bollinger ?? null,
-        patterns: Array.isArray(extra.pattern) ? extra.pattern : [],
-        support: extra.support ?? null,
-        resistance: extra.resistance ?? null,
-        reasons: Array.isArray(extra.reasons) ? extra.reasons : [],
-        decisionTrace: `Decision:${r.action}|Conf:${r.confidence}|Regime:${extra.marketRegime || 'UNKNOWN'}`,
-        outcomeTrace: `Outcome:${r.outcome}|EntryPx:${entryPx}|ExitPx:${exitPx}`,
-        runtimeMetadata: {
-          sessionId: r.session_id,
-          version: '3.0.0',
-          validatedAt: Date.now(),
-        },
-      };
-    });
+      const patterns = Array.isArray(extra.pattern)
+        ? extra.pattern.filter((item): item is string => typeof item === 'string')
+        : [];
+      const confidence = canonicalConfidence(row.confidence);
+      const marketRegime = typeof extra.marketRegime === 'string' && extra.marketRegime.trim() ? extra.marketRegime : null;
+      records.push(Object.freeze({
+        tradeId: row.id,
+        asset: String(row.asset).trim(),
+        direction: row.action as TradingAction,
+        entryPrice,
+        exitPrice,
+        entryTime: row.entry_timestamp,
+        exitTime: row.completion_timestamp,
+        expirySeconds: row.expiry_seconds,
+        result: row.outcome as TradeOutcome.WIN | TradeOutcome.LOSS,
+        confidence,
+        agreementScore: finiteRatio(extra.agreementScore),
+        overallStrength: finiteRatio(extra.overallStrength),
+        risk: Object.values(RiskLevel).includes(extra.risk as RiskLevel) ? extra.risk as RiskLevel : null,
+        trend: typeof extra.trend === 'string' ? extra.trend : null,
+        structure: typeof extra.structure === 'string' ? extra.structure : null,
+        momentum: typeof extra.momentum === 'string' ? extra.momentum : null,
+        volatility: typeof extra.volatility === 'string' ? extra.volatility : null,
+        marketRegime,
+        rsi: finiteValue(extra.rsi),
+        ema: finiteValue(extra.ema),
+        bollinger: finiteValue(extra.bollinger),
+        patterns: Object.freeze(patterns) as unknown as string[],
+        support: finiteValue(extra.support),
+        resistance: finiteValue(extra.resistance),
+        reasons: Object.freeze(reasons) as unknown as string[],
+        mlFeatures: mlFeatures ? Object.freeze(mlFeatures) as unknown as number[] : null,
+        decisionTrace: `Decision:${row.action}|Confidence:${confidence ?? 'UNAVAILABLE'}|Regime:${marketRegime ?? 'UNAVAILABLE'}`,
+        outcomeTrace: `Outcome:${row.outcome}|EntryPx:${entryPrice}|ExitPx:${exitPrice}`,
+        runtimeMetadata: Object.freeze({ sessionId: row.session_id, version: APP_VERSION, validatedAt: Date.now() }),
+      }));
+    }
+    return records;
   }
 
-  // ----------------------------------------------------------
-  // Task 2: Data Quality Validation & Auto Repair
-  // ----------------------------------------------------------
   public auditAndRepairDataQuality(): DataQualityAuditReport {
-    if (!this.db) {
-      return {
-        totalRecordsChecked: 0,
-        validRecordsCount: 0,
-        repairedRecordsCount: 0,
-        corruptRecordsCount: 0,
-        anomaliesDetected: {
-          duplicateIds: [],
-          missingOutcomes: [],
-          invalidTimestamps: [],
-          impossibleConfidence: [],
-          negativeDurations: [],
-          invalidPrices: [],
-          corruptSnapshots: [],
-        },
-        repairedAt: Date.now(),
-      };
-    }
+    const emptyAnomalies = {
+      duplicateIds: [] as string[], missingOutcomes: [] as string[], invalidTimestamps: [] as string[],
+      impossibleConfidence: [] as string[], negativeDurations: [] as string[], invalidPrices: [] as string[],
+      corruptSnapshots: [] as string[],
+    };
+    if (!this.db) return { totalRecordsChecked: 0, validRecordsCount: 0, repairedRecordsCount: 0, corruptRecordsCount: 0, anomaliesDetected: emptyAnomalies, repairedAt: Date.now() };
 
-    const rows = this.db.prepare(`SELECT * FROM tracked_trades`).all() as Array<{
-      id: string;
-      session_id: string;
-      action: string;
-      status: string;
-      outcome: string | null;
-      entry_timestamp: number;
-      completion_timestamp: number | null;
-      confidence: number;
-      entry_price: string | null;
-      completion_price: string | null;
-      original_reasons: string | null;
-    }>;
-
-    const duplicateIds: string[] = [];
-    const missingOutcomes: string[] = [];
-    const invalidTimestamps: string[] = [];
-    const impossibleConfidence: string[] = [];
-    const negativeDurations: string[] = [];
-    const invalidPrices: string[] = [];
-    const corruptSnapshots: string[] = [];
-
-    const seenIds = new Set<string>();
-    let repairedCount = 0;
+    const rows = this.db.prepare('SELECT * FROM tracked_trades').all() as any[];
+    const anomalies = emptyAnomalies;
+    const seen = new Set<string>();
+    let repairedRecordsCount = 0;
+    const repaired = new Set<string>();
     const now = Date.now();
+    const repair = (id: string, sql: string, ...params: unknown[]) => {
+      this.db!.prepare(sql).run(...params, id);
+      if (!repaired.has(id)) { repaired.add(id); repairedRecordsCount++; }
+    };
 
-    for (const r of rows) {
-      // 1. Duplicate ID
-      if (seenIds.has(r.id)) {
-        duplicateIds.push(r.id);
-      } else {
-        seenIds.add(r.id);
-      }
-
-      // 2. Missing Outcome on Completed Trade
-      if (r.status === 'COMPLETED' && (!r.outcome || r.outcome === 'UNRESOLVED')) {
-        missingOutcomes.push(r.id);
-        // Repair: mark as UNRESOLVED outcome explicitly in DB
-        this.db.prepare(`UPDATE tracked_trades SET outcome = 'UNRESOLVED' WHERE id = ?`).run(r.id);
-        repairedCount++;
-      }
-
-      // 3. Invalid Timestamps
-      if (!r.entry_timestamp || r.entry_timestamp <= 0 || r.entry_timestamp > now + 3600000) {
-        invalidTimestamps.push(r.id);
-      }
-
-      // 4. Impossible Confidence
-      if (typeof r.confidence !== 'number' || isNaN(r.confidence) || r.confidence < 0 || r.confidence > 100) {
-        impossibleConfidence.push(r.id);
-        // Repair: reset confidence to 0.5 default
-        this.db.prepare(`UPDATE tracked_trades SET confidence = 0.5 WHERE id = ?`).run(r.id);
-        repairedCount++;
-      }
-
-      // 5. Negative Duration
-      if (r.completion_timestamp && r.completion_timestamp < r.entry_timestamp) {
-        negativeDurations.push(r.id);
-        // Repair: set completion timestamp to entry timestamp + expiry
-        this.db.prepare(`UPDATE tracked_trades SET completion_timestamp = entry_timestamp + (expiry_seconds * 1000) WHERE id = ?`).run(r.id);
-        repairedCount++;
-      }
-
-      // 6. Invalid Prices (Irrecoverable -> mark status = 'INVALID')
-      if (r.entry_price && (isNaN(parseFloat(r.entry_price)) || parseFloat(r.entry_price) <= 0)) {
-        invalidPrices.push(r.id);
-        this.db.prepare(`UPDATE tracked_trades SET status = 'INVALID' WHERE id = ?`).run(r.id);
-        repairedCount++;
-      }
-
-      // 7. Corrupt JSON Snapshot Payload
-      if (r.original_reasons) {
-        try {
-          JSON.parse(r.original_reasons);
-        } catch {
-          corruptSnapshots.push(r.id);
-          // Repair: reset payload to empty array JSON string
-          this.db.prepare(`UPDATE tracked_trades SET original_reasons = '[]' WHERE id = ?`).run(r.id);
-          repairedCount++;
+    this.db.transaction(() => {
+      for (const row of rows) {
+        if (seen.has(row.id)) anomalies.duplicateIds.push(row.id); else seen.add(row.id);
+        if (row.status === 'COMPLETED' && !['WIN', 'LOSS', 'DRAW'].includes(row.outcome)) {
+          anomalies.missingOutcomes.push(row.id);
+          repair(row.id, "UPDATE tracked_trades SET status = 'CANCELLED', outcome = NULL WHERE id = ?");
+        }
+        if (!Number.isFinite(row.entry_timestamp) || row.entry_timestamp <= 0 || row.entry_timestamp > now + 3_600_000) {
+          anomalies.invalidTimestamps.push(row.id);
+          repair(row.id, "UPDATE tracked_trades SET status = 'CANCELLED', outcome = NULL WHERE id = ?");
+        }
+        if (row.confidence !== null && (typeof row.confidence !== 'number' || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1)) {
+          anomalies.impossibleConfidence.push(row.id);
+          const normalized = canonicalConfidence(row.confidence);
+          repair(row.id, 'UPDATE tracked_trades SET confidence = ? WHERE id = ?', normalized);
+        }
+        if (row.completion_timestamp !== null && row.completion_timestamp < row.entry_timestamp) {
+          anomalies.negativeDurations.push(row.id);
+          repair(row.id, "UPDATE tracked_trades SET status = 'CANCELLED', outcome = NULL WHERE id = ?");
+        }
+        const entry = row.entry_price === null ? null : finitePositive(row.entry_price);
+        const exit = row.completion_price === null ? null : finitePositive(row.completion_price);
+        if ((row.entry_price !== null && entry === null) || (row.completion_price !== null && exit === null)) {
+          anomalies.invalidPrices.push(row.id);
+          repair(row.id, "UPDATE tracked_trades SET status = 'CANCELLED', outcome = NULL WHERE id = ?");
+        }
+        if (row.original_reasons) {
+          try { JSON.parse(row.original_reasons); }
+          catch {
+            anomalies.corruptSnapshots.push(row.id);
+            repair(row.id, "UPDATE tracked_trades SET original_reasons = '[]' WHERE id = ?");
+          }
         }
       }
-    }
+    });
 
-    const totalCorrupt = duplicateIds.length + invalidTimestamps.length + invalidPrices.length;
-    const validCount = Math.max(0, rows.length - totalCorrupt);
-
+    const corruptIds = new Set([
+      ...anomalies.duplicateIds, ...anomalies.missingOutcomes, ...anomalies.invalidTimestamps,
+      ...anomalies.impossibleConfidence, ...anomalies.negativeDurations, ...anomalies.invalidPrices,
+      ...anomalies.corruptSnapshots,
+    ]);
     return {
       totalRecordsChecked: rows.length,
-      validRecordsCount: validCount,
-      repairedRecordsCount: repairedCount,
-      corruptRecordsCount: totalCorrupt,
-      anomaliesDetected: {
-        duplicateIds,
-        missingOutcomes,
-        invalidTimestamps,
-        impossibleConfidence,
-        negativeDurations,
-        invalidPrices,
-        corruptSnapshots,
-      },
+      validRecordsCount: Math.max(0, rows.length - corruptIds.size),
+      repairedRecordsCount,
+      corruptRecordsCount: corruptIds.size,
+      anomaliesDetected: anomalies,
       repairedAt: now,
     };
   }
 
-  // ----------------------------------------------------------
-  // Task 4: Trade Replay Validation
-  // ----------------------------------------------------------
   public validateTradeReplay(tradeId?: string): ReplayValidationResult {
-    if (!this.db) {
-      return {
-        tradeId: tradeId || 'none',
-        asset: 'UNKNOWN',
-        direction: 'NONE',
-        matchedDecision: false,
-        matchedEntry: false,
-        matchedCountdown: false,
-        matchedExit: false,
-        matchedOutcome: false,
-        matchedStoredResult: false,
-        isValidReplay: false,
-        validationError: 'Database uninitialized',
-      };
-    }
+    const unavailable = (message: string): ReplayValidationResult => ({
+      tradeId: tradeId || 'none', asset: 'UNKNOWN', direction: 'NONE', matchedDecision: false,
+      matchedEntry: false, matchedCountdown: false, matchedExit: false, matchedOutcome: false,
+      matchedStoredResult: false, isValidReplay: false, validationError: message,
+    });
+    if (!this.db) return unavailable('Database uninitialized');
+    const row = tradeId
+      ? this.db.prepare('SELECT * FROM tracked_trades WHERE id = ?').get(tradeId) as any
+      : this.db.prepare("SELECT * FROM tracked_trades WHERE status = 'COMPLETED' AND outcome IN ('WIN','LOSS','DRAW') ORDER BY completion_timestamp DESC LIMIT 1").get() as any;
+    if (!row) return unavailable('Trade record not found for replay');
 
-    const query = tradeId ? 'WHERE id = ?' : "WHERE status = 'COMPLETED' AND outcome IS NOT NULL ORDER BY completion_timestamp DESC LIMIT 1";
-    const params = tradeId ? [tradeId] : [];
-
-    const row = this.db.prepare(`SELECT * FROM tracked_trades ${query}`).get(...params) as any;
-
-    if (!row) {
-      return {
-        tradeId: tradeId || 'none',
-        asset: 'UNKNOWN',
-        direction: 'NONE',
-        matchedDecision: false,
-        matchedEntry: false,
-        matchedCountdown: false,
-        matchedExit: false,
-        matchedOutcome: false,
-        matchedStoredResult: false,
-        isValidReplay: false,
-        validationError: 'Trade record not found for replay',
-      };
-    }
-
-    const matchedDecision = ['BUY', 'SELL'].includes(row.action);
-    const matchedEntry = Boolean(row.entry_timestamp && row.entry_timestamp > 0);
-    const matchedCountdown = row.expiry_seconds > 0;
-    const exitTimestamp = row.completion_timestamp || (row.entry_timestamp + row.expiry_seconds * 1000);
-    const matchedExit = exitTimestamp >= row.entry_timestamp;
-    const matchedOutcome = ['WIN', 'LOSS', 'DRAW', 'UNRESOLVED'].includes(row.outcome);
+    const matchedDecision = [TradingAction.BUY, TradingAction.SELL].includes(row.action);
+    const matchedEntry = Number.isFinite(row.entry_timestamp) && row.entry_timestamp > 0 && finitePositive(row.entry_price) !== null;
+    const matchedCountdown = Number.isFinite(row.expiry_seconds) && row.expiry_seconds > 0;
+    const matchedExit = Number.isFinite(row.completion_timestamp)
+      && row.completion_timestamp >= row.entry_timestamp
+      && finitePositive(row.completion_price) !== null;
+    const matchedOutcome = [TradeOutcome.WIN, TradeOutcome.LOSS, TradeOutcome.DRAW].includes(row.outcome);
     const matchedStoredResult = row.status === 'COMPLETED';
-
-    const isValidReplay = matchedDecision && matchedEntry && matchedCountdown && matchedExit && matchedOutcome && matchedStoredResult;
-
     return {
       tradeId: row.id,
-      asset: row.asset || 'EUR/USD',
+      asset: typeof row.asset === 'string' && row.asset.trim() ? row.asset.trim() : 'UNKNOWN',
       direction: row.action,
       matchedDecision,
       matchedEntry,
@@ -366,94 +278,52 @@ export class SelfLearningDatasetManager {
       matchedExit,
       matchedOutcome,
       matchedStoredResult,
-      isValidReplay,
+      isValidReplay: matchedDecision && matchedEntry && matchedCountdown && matchedExit && matchedOutcome && matchedStoredResult,
     };
   }
 
-  // ----------------------------------------------------------
-  // Task 5: Model Readiness Score Evaluator
-  // ----------------------------------------------------------
   public getModelReadinessScore(): ModelReadinessScore {
     const records = this.getCompleteLearningRecords();
     const sampleCount = records.length;
+    if (sampleCount === 0) return {
+      readinessScorePct: 0, datasetQualityPct: 0, featureCompletenessPct: 0,
+      labelQualityPct: 0, noiseLevelPct: 100, missingValuesPct: 100,
+      consistencyPct: 0, sampleCount: 0, readinessStatus: 'INSUFFICIENT_SAMPLES',
+      recommendations: ['Accumulate at least 100 verified LIVE, price-complete BUY/SELL outcomes.'],
+    };
 
-    if (sampleCount === 0) {
-      return {
-        readinessScorePct: 0,
-        datasetQualityPct: 0,
-        featureCompletenessPct: 0,
-        labelQualityPct: 0,
-        noiseLevelPct: 0,
-        missingValuesPct: 0,
-        consistencyPct: 100,
-        sampleCount: 0,
-        readinessStatus: 'INSUFFICIENT_SAMPLES',
-        recommendations: ['Accumulate at least 100 completed trades to enable statistical calibration.'],
-      };
-    }
+    const featureComplete = records.filter((record) => record.mlFeatures?.length === 11 && record.confidence !== null).length;
+    const labelComplete = records.filter((record) => record.result === TradeOutcome.WIN || record.result === TradeOutcome.LOSS).length;
+    const canonicalConfidenceCount = records.filter((record) => record.confidence !== null && record.confidence >= 0 && record.confidence <= 1).length;
+    const wins = records.filter((record) => record.result === TradeOutcome.WIN).length;
+    const losses = records.filter((record) => record.result === TradeOutcome.LOSS).length;
 
-    // Feature Completeness: percentage of records with all 28 features populated
-    let completeFeaturesCount = 0;
-    let validLabelsCount = 0;
-    let lowNoiseCount = 0;
-    let noMissingValuesCount = 0;
-
-    for (const r of records) {
-      if (r.asset && r.direction && r.entryPrice && r.exitPrice && r.reasons.length > 0) {
-        completeFeaturesCount++;
-      }
-      if (['WIN', 'LOSS', 'DRAW'].includes(r.result)) {
-        validLabelsCount++;
-      }
-      if (r.confidence >= 50 && r.confidence <= 100) {
-        lowNoiseCount++;
-      }
-      if (r.rsi !== null && r.ema !== null && r.support !== null && r.resistance !== null) {
-        noMissingValuesCount++;
-      }
-    }
-
-    const featureCompletenessPct = Math.round((completeFeaturesCount / sampleCount) * 100);
-    const labelQualityPct = Math.round((validLabelsCount / sampleCount) * 100);
-    const noiseLevelPct = Math.round((1 - (lowNoiseCount / sampleCount)) * 100);
-    const missingValuesPct = Math.round((1 - (noMissingValuesCount / sampleCount)) * 100);
-
-    // Sample Size Factor: 100 trades = 60%, 300 trades = 85%, 1000 trades = 100%
-    const sampleFactor = sampleCount >= 1000 ? 1.0 : sampleCount >= 300 ? 0.85 : sampleCount >= 100 ? 0.65 : (sampleCount / 100) * 0.5;
-
-    const datasetQualityPct = Math.round((featureCompletenessPct * 0.4 + labelQualityPct * 0.4 + (100 - noiseLevelPct) * 0.2));
-    const consistencyPct = Math.round(labelQualityPct * 0.9 + featureCompletenessPct * 0.1);
-
+    const featureCompletenessPct = Math.round(featureComplete / sampleCount * 100);
+    const labelQualityPct = Math.round(labelComplete / sampleCount * 100);
+    const noiseLevelPct = Math.round((1 - canonicalConfidenceCount / sampleCount) * 100);
+    const missingValuesPct = 100 - featureCompletenessPct;
+    const classDiversityPct = wins > 0 && losses > 0 ? Math.round(Math.min(wins, losses) / Math.max(wins, losses) * 100) : 0;
+    const datasetQualityPct = Math.round(featureCompletenessPct * 0.45 + labelQualityPct * 0.25 + (100 - noiseLevelPct) * 0.15 + classDiversityPct * 0.15);
+    const sampleFactor = sampleCount >= 1000 ? 1 : sampleCount >= 300 ? 0.85 : sampleCount >= 100 ? 0.65 : sampleCount / 200;
     const readinessScorePct = Math.round(datasetQualityPct * sampleFactor);
-
-    let readinessStatus: ModelReadinessScore['readinessStatus'] = 'INSUFFICIENT_SAMPLES';
+    const consistencyPct = Math.round((labelQualityPct + classDiversityPct + featureCompletenessPct) / 3);
     const recommendations: string[] = [];
+    let readinessStatus: ModelReadinessScore['readinessStatus'] = 'INSUFFICIENT_SAMPLES';
 
-    if (sampleCount < 100) {
-      readinessStatus = 'INSUFFICIENT_SAMPLES';
-      recommendations.push(`Current sample count (${sampleCount}) is below recommended minimum threshold (100 trades).`);
+    if (sampleCount < 100 || Math.min(wins, losses) < 10) {
+      recommendations.push(`Need >=100 clean samples and >=10 examples per class (current ${wins} WIN / ${losses} LOSS).`);
     } else if (readinessScorePct >= 80) {
       readinessStatus = 'EXCELLENT';
-      recommendations.push('Dataset meets production machine learning and offline calibration readiness standards.');
+      recommendations.push('Dataset is suitable for quality-gated offline model evaluation.');
     } else if (readinessScorePct >= 60) {
       readinessStatus = 'GOOD';
-      recommendations.push('Dataset suitable for statistical confidence calibration and decision replay optimization.');
+      recommendations.push('Dataset can support guarded calibration; continue collecting complete feature snapshots.');
     } else {
       readinessStatus = 'MODERATE';
-      recommendations.push('Run data quality repair to fix missing feature values and label gaps.');
+      recommendations.push('Feature completeness or class balance is too weak for production model influence.');
     }
 
-    return {
-      readinessScorePct,
-      datasetQualityPct,
-      featureCompletenessPct,
-      labelQualityPct,
-      noiseLevelPct,
-      missingValuesPct,
-      consistencyPct,
-      sampleCount,
-      readinessStatus,
-      recommendations,
-    };
+    return { readinessScorePct, datasetQualityPct, featureCompletenessPct, labelQualityPct,
+      noiseLevelPct, missingValuesPct, consistencyPct, sampleCount, readinessStatus, recommendations };
   }
 }

@@ -1,11 +1,36 @@
+# Dependencies
 node_modules/
+
+# Generated application output
 dist/
 dist-electron/
 release/
+coverage/
+*.tsbuildinfo
+
+# Local databases and logs
+*.db
+*.db-shm
+*.db-wal
+*.log
+logs/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Temporary audit/recovery material
 .freebuff/
 .mars-audit/
-.env
-*.local
-*.log
-
 .git-backup/
+scratch/
+.mars-restart-source-status.txt
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

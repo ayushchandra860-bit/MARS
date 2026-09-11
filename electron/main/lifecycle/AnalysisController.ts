@@ -16,11 +16,10 @@ import { SignalStabilizer } from '../decision/SignalStabilizer';
 import { ExpiryEngine } from '../decision/ExpiryEngine';
 import { DiagnosticsTracker } from '../scanner/ScannerDiagnostics';
 import { OverlayManager } from '../overlay/OverlayManager';
-import { OutcomeEvaluator } from '../brain/OutcomeEvaluator';
 import { SessionId } from '../../../shared/types/scanner';
 import { AnalysisState, SystemStatus } from '../../../shared/types/session';
 import { ScannerStage, StageStatus } from '../../../shared/types/diagnostics';
-import { TradingAction, SignalLifecycle, RiskLevel, TradeOutcome, SignalStatusLabel, TradeStatusLabel, SignalStatusState, TradeStatusState, TradeHealth, TradeExplanation } from '../../../shared/types/decision';
+import { TradingAction, SignalLifecycle, RiskLevel, SignalStatusLabel, TradeStatusLabel, SignalStatusState, TradeStatusState, TradeHealth, TradeExplanation } from '../../../shared/types/decision';
 import { MarketRegime, TrendDirection, MomentumLevel, MarketStructure } from '../../../shared/types/market';
 import { OverlayState, SignalLifecycleStage, ControlCenterState, DeveloperDiagnostics, AppSettings, DEFAULT_SETTINGS } from '../../../shared/types/ipc';
 import { IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
@@ -31,6 +30,7 @@ import { TradeRepository } from '../database/repositories/TradeRepository';
 import { SignalHistoryRepository } from '../database/repositories/SignalHistoryRepository';
 import { EnrichedSignalRecord } from '../database/repositories/SignalHistoryRepository';
 import { EmbeddedBrowserManager } from '../view/EmbeddedBrowserManager';
+import { deriveVerifiedPriceOutcome } from '../trade/verifiedTradeOutcome';
 
 import { MarketIntelEngine } from '../market/MarketIntelEngine';
 import { CalibrationDatasetManager } from '../brain/CalibrationDatasetManager';
@@ -53,7 +53,6 @@ export class AnalysisController {
   private expiryEngine: ExpiryEngine;
   private marketIntelEngine: MarketIntelEngine;
   private overlayManager: OverlayManager;
-  private outcomeEvaluator: OutcomeEvaluator;
   private tradeRepo: TradeRepository | null = null;
   private historyRepo: SignalHistoryRepository | null = null;
   private mainWindow: BrowserWindow | null = null;
@@ -121,23 +120,12 @@ export class AnalysisController {
     this.stabilizer = new SignalStabilizer();
     this.expiryEngine = new ExpiryEngine();
     this.marketIntelEngine = new MarketIntelEngine();
-    this.outcomeEvaluator = new OutcomeEvaluator();
     this.overlayManager = overlayManager;
     this.mainWindow = mainWindow;
     EmbeddedBrowserManager.getInstance().setTradeClickHandler((event) => {
       this.handleDetectedTradeClick(event);
     });
-    EmbeddedBrowserManager.getInstance().setTradeResultHandler((event) => {
-      const rawOutcome = String(event.outcome || '').toUpperCase();
-      const outcome = rawOutcome === 'WIN' ? TradeOutcome.WIN : rawOutcome === 'LOSS' ? TradeOutcome.LOSS : rawOutcome === 'DRAW' ? TradeOutcome.DRAW : null;
-      if (outcome) {
-        TradeLifecycleManager.getInstance().resolveNextActiveTrade(
-          outcome,
-          String(event.amount ?? '0')
-        );
-        this.emitPerformanceRefresh();
-      }
-    });
+
 
     if (database) {
       this.tradeRepo = new TradeRepository(database);
@@ -694,43 +682,22 @@ export class AnalysisController {
   }
 
   private updateTradeLifecycle(observation: any): void {
-    const activeTrades = TradeLifecycleManager.getInstance().getActiveTrades();
+    const manager = TradeLifecycleManager.getInstance();
+    const activeTrades = manager.getActiveTrades();
     if (activeTrades.length === 0) return;
 
     const now = Date.now();
-    const currentPrice = observation?.currentPrice || 0;
     let anyResolved = false;
-
     for (const trade of activeTrades) {
-      if (trade.expiryTimestamp <= now) {
-        const entryPrice = parseFloat(trade.entryPrice || '0');
-        if (entryPrice > 0 && currentPrice > 0) {
-          const sample = {
-            decision: trade.direction,
-            entryPricePx: entryPrice,
-            expiryPricePx: currentPrice,
-            outcome: null as TradeOutcome | null,
-          };
-          const outcome = this.outcomeEvaluator.evaluate(sample as any, currentPrice);
-          TradeLifecycleManager.getInstance().resolveTradeOutcome(
-            trade.id,
-            outcome && outcome !== TradeOutcome.UNRESOLVED ? outcome : TradeOutcome.UNRESOLVED,
-            currentPrice.toString()
-          );
-        } else {
-          TradeLifecycleManager.getInstance().resolveTradeOutcome(
-            trade.id,
-            TradeOutcome.UNRESOLVED,
-            '0'
-          );
-        }
+      if (trade.expiryTimestamp > now) continue;
+      manager.handleTradeExpiry(trade.id);
+      const verified = deriveVerifiedPriceOutcome(trade, observation);
+      if (!verified) continue;
+      if (manager.resolveTradeOutcome(trade.id, verified.outcome, verified.completionPrice)) {
         anyResolved = true;
       }
     }
-
-    if (anyResolved) {
-      this.emitPerformanceRefresh();
-    }
+    if (anyResolved) this.emitPerformanceRefresh();
   }
 
   private createTrackedTrade(stabilized: any, observation: any): void {
@@ -1372,7 +1339,7 @@ export class AnalysisController {
       }
     }
     if (!this.isValidAssetName(asset)) {
-      asset = 'OTC ASSET';
+      asset = null;
     }
 
     const priceCandidates = [
@@ -1389,9 +1356,6 @@ export class AnalysisController {
         break;
       }
     }
-    if (!entryPrice) {
-      entryPrice = 1.0;
-    }
 
     const expiryLabel = activeSignalMatches
       ? this.activeSignal!.expiryLabel
@@ -1401,40 +1365,45 @@ export class AnalysisController {
       ? this.activeSignal!.signalId
       : `manual-signal-${event.eventId || Date.now()}`;
 
-    TradeLifecycleManager.getInstance().registerTrade({
+    const registeredTrade = TradeLifecycleManager.getInstance().registerTrade({
       sessionId: this.activeSessionId || `manual-${Date.now()}`,
       signalId,
       eventId: event.eventId,
+      executionId: typeof (event as any).executionId === 'string' ? (event as any).executionId : undefined,
+      platformMode: (event as any).platformMode,
       direction: event.action,
       asset,
       timeframe: this.lastObservationWithFeatures?.timeframe || '1m',
       expirySeconds,
       confidence: activeSignalMatches ? this.activeSignal!.originalConfidence : null,
       regime: activeSignalMatches ? this.activeSignal!.regime : (this.lastObservationWithFeatures?.marketRegime || null),
-      entryPrice: entryPrice.toString(),
+      entryPrice: entryPrice ? entryPrice.toString() : null,
       reasons: activeSignalMatches ? this.activeSignal!.originalReasons : [],
       mlFeatures: MLEngine.getInstance().extractFeatures(this.lastObservationWithFeatures || {}),
     });
+
+    if (!registeredTrade) return;
+    const confirmedSignalId = registeredTrade.signalId || `trade-${registeredTrade.id}`;
 
     this.lastTradeStatusState = 'TRADE ACTIVE';
     this.lastOverlaySendTime = 0;
 
     // Immediately emit overlay state with TRADE ACTIVE and active countdown context
     if (this.lastOverlayState) {
-      const remaining = expirySeconds;
+      const remaining = registeredTrade.expirySeconds;
       const updatedOverlay: OverlayState = {
         ...this.lastOverlayState,
         tradeStatus: 'TRADE ACTIVE',
         activeTradeContext: {
-          signalId,
-          originalAction: event.action,
-          originalConfidence: activeSignalMatches ? (this.activeSignal!.originalConfidence ?? 0) : 0,
-          entryTimestamp: Date.now(),
-          recommendedExpiry: expiryLabel,
+          signalId: confirmedSignalId,
+          originalAction: registeredTrade.direction,
+          originalConfidence: registeredTrade.confidence ?? 0,
+          entryTimestamp: registeredTrade.entryTimestamp,
+          recommendedExpiry: registeredTrade.expiryLabel || expiryLabel,
           remainingSeconds: remaining,
           status: 'STABLE',
           tradeStatus: 'TRADE ACTIVE',
-          reason: activeSignalMatches ? (this.activeSignal!.originalReasons[0] || 'Signal execution') : 'Manual trade entry',
+          reason: registeredTrade.reasons?.[0] || 'Verified trade execution',
         },
         lastUpdate: Date.now(),
       };
