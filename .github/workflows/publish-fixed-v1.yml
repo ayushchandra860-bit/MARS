@@ -56,7 +56,7 @@ jobs:
       - name: Package installer and portable app
         shell: pwsh
         run: |
-          & npm exec electron-builder -- --win --x64 2>&1 | Tee-Object -FilePath ci-logs/electron-builder.log
+          & npm exec electron-builder -- --win --x64 --publish never 2>&1 | Tee-Object -FilePath ci-logs/electron-builder.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $executables = @(Get-ChildItem release -Filter *.exe -File)
           if ($executables.Count -lt 2) { throw 'Expected both NSIS and portable executables.' }
