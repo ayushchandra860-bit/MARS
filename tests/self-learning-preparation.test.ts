@@ -6,6 +6,7 @@ import { TradeRepository } from '../electron/main/database/repositories/TradeRep
 import { TradingAction, TradeOutcome } from '../shared/types/decision';
 import { PlatformMode } from '../shared/types/canonical';
 import { FEATURE_NAMES } from '../electron/main/decision/MLEngine';
+import { APP_VERSION } from '../shared/version';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -32,7 +33,7 @@ describe('verified self-learning dataset', () => {
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({ tradeId: live.id, asset: 'EUR/USD', direction: 'BUY', entryPrice: 1.085, exitPrice: 1.087, confidence: 0.85 });
     expect(records[0].mlFeatures).toHaveLength(FEATURE_NAMES.length);
-    expect(records[0].runtimeMetadata.version).toBe('3.0.1-rc.1');
+    expect(records[0].runtimeMetadata.version).toBe(APP_VERSION);
   });
 
   it('normalizes legacy percent confidence and removes impossible values instead of inventing 0.5', () => {
