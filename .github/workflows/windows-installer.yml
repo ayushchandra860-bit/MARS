@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 
 concurrency:
   group: windows-installer-${{ github.ref }}
@@ -93,6 +95,48 @@ jobs:
           }
           $lines | Set-Content -Encoding utf8 release/SHA256SUMS.txt
           Get-ChildItem release
+
+      - name: Publish reusable Windows failure diagnostic
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const marker = '<!-- mars-windows-failure -->';
+            const directory = path.join(process.env.GITHUB_WORKSPACE, 'ci-logs');
+            const names = fs.existsSync(directory)
+              ? fs.readdirSync(directory).filter((name) => name.endsWith('.log')).sort()
+              : [];
+            const sections = names.map((name) => {
+              const text = fs.readFileSync(path.join(directory, name), 'utf8');
+              const lines = text.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).slice(-120);
+              return `#### ${name}\n\n\`\`\`text\n${lines.join('\n').slice(-12000)}\n\`\`\``;
+            });
+            const body = `${marker}\n### Windows installer failure diagnostic\n\nHead: \`${context.sha}\`\n\n${sections.join('\n\n').slice(-50000) || 'No stage log was produced.'}`;
+            const issueNumber = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) => comment.user?.type === 'Bot' && comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+            }
 
       - name: Upload CI diagnostics
         if: always()
