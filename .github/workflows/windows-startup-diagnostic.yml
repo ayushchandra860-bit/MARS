@@ -84,12 +84,13 @@ jobs:
               if ($visible) { break }
             }
             $process.Refresh()
-            "$label primary exited: $($process.HasExited)" | Add-Content $summary
-            if ($process.HasExited) { "$label exit code: $($process.ExitCode)" | Add-Content $summary }
+            $exitedBeforeCleanup = $process.HasExited
+            "$label primary exited: $exitedBeforeCleanup" | Add-Content $summary
+            if ($exitedBeforeCleanup) { "$label exit code: $($process.ExitCode)" | Add-Content $summary }
             "$label visible window: $visible" | Add-Content $summary
-            if (-not $process.HasExited) { & taskkill /PID $process.Id /T /F 2>&1 | Out-Null }
+            if (-not $exitedBeforeCleanup) { & taskkill /PID $process.Id /T /F 2>&1 | Out-Null }
             Start-Sleep -Seconds 1
-            if ($process.HasExited -or -not $visible) { throw "$label startup did not produce a visible window." }
+            if ($exitedBeforeCleanup -or -not $visible) { throw "$label startup did not produce a visible window." }
           }
 
           $userData = Join-Path $env:APPDATA 'MARS PRO V3'
