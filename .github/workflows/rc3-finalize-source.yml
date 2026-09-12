@@ -28,23 +28,7 @@ jobs:
 
           const controllerPath = 'electron/main/lifecycle/AnalysisController.ts';
           let controller = fs.readFileSync(controllerPath, 'utf8');
-          const oldLoop = `  private startScanLoop(intervalMs: number): void {
-            if (this.scanTimer) {
-              clearInterval(this.scanTimer);
-            }
-            this.scanTimer = setInterval(() => {
-              this.runScanCycle().catch((err) => {
-                console.error('[MARS] Unhandled scan cycle error:', err);
-              });
-            }, intervalMs);
-          }
-
-          private stopScanLoop(): void {
-            if (this.scanTimer) {
-              clearInterval(this.scanTimer);
-              this.scanTimer = null;
-            }
-          }`;
+          const loopPattern = /  private startScanLoop\(intervalMs: number\): void \{[\s\S]*?\n  private stopScanLoop\(\): void \{[\s\S]*?\n  \}\n\n  private async runScanCycle/;
           const newLoop = `  private startScanLoop(intervalMs: number): void {
             this.stopScanLoop();
             const scheduleNext = (): void => {
@@ -68,9 +52,11 @@ jobs:
               clearTimeout(this.scanTimer);
               this.scanTimer = null;
             }
-          }`;
-          if (!controller.includes(oldLoop)) throw new Error('Expected AnalysisController scan loop was not found.');
-          controller = controller.replace(oldLoop, newLoop);
+          }
+
+          private async runScanCycle`;
+          if (!loopPattern.test(controller)) throw new Error('Expected AnalysisController scan loop was not found.');
+          controller = controller.replace(loopPattern, newLoop);
           fs.writeFileSync(controllerPath, controller);
 
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
