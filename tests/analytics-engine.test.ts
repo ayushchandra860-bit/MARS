@@ -5,6 +5,7 @@ import { RunningTradeManager } from '../electron/main/trade/RunningTradeManager'
 import { Database } from '../electron/main/database/Database';
 import { TradeRepository } from '../electron/main/database/repositories/TradeRepository';
 import { TradingAction, TradeOutcome } from '../shared/types/decision';
+import { PlatformMode } from '../shared/types/canonical';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -45,11 +46,19 @@ describe('AnalyticsEngine & Decision Intelligence (Sprint T4)', () => {
   });
 
   it('Task T4.2: calculates Confidence Bucket analytics accurately', () => {
-    // Register 2 trades in 80-89% bucket (WIN and LOSS)
-    const t1 = tradeManager.registerTrade({ sessionId: 's4', asset: 'EUR/USD', direction: TradingAction.BUY, confidence: 0.85, eventId: 't4-1' });
+    // Analytics intentionally accepts only verified LIVE outcomes with usable prices.
+    const t1 = tradeManager.registerTrade({
+      sessionId: 's4', signalId: 'signal-t4-1', asset: 'EUR/USD',
+      direction: TradingAction.BUY, confidence: 0.85, eventId: 't4-1',
+      entryPrice: '1.0990', platformMode: PlatformMode.LIVE,
+    });
     tradeManager.resolveTradeOutcome(t1!.id, TradeOutcome.WIN, '1.1000');
 
-    const t2 = tradeManager.registerTrade({ sessionId: 's4', asset: 'EUR/USD', direction: TradingAction.BUY, confidence: 0.82, eventId: 't4-2' });
+    const t2 = tradeManager.registerTrade({
+      sessionId: 's4', signalId: 'signal-t4-2', asset: 'EUR/USD',
+      direction: TradingAction.BUY, confidence: 0.82, eventId: 't4-2',
+      entryPrice: '1.1000', platformMode: PlatformMode.LIVE,
+    });
     tradeManager.resolveTradeOutcome(t2!.id, TradeOutcome.LOSS, '1.0950');
 
     const buckets = analyticsEngine.getConfidenceAnalytics();
@@ -63,7 +72,11 @@ describe('AnalyticsEngine & Decision Intelligence (Sprint T4)', () => {
   });
 
   it('Task T4.3 & T4.4: calculates Asset and Market Regime analytics', () => {
-    const t1 = tradeManager.registerTrade({ sessionId: 's4', asset: 'GBP/USD', direction: TradingAction.BUY, eventId: 't4-3' });
+    const t1 = tradeManager.registerTrade({
+      sessionId: 's4', signalId: 'signal-t4-3', asset: 'GBP/USD',
+      direction: TradingAction.BUY, eventId: 't4-3',
+      entryPrice: '1.2490', platformMode: PlatformMode.LIVE,
+    });
     tradeManager.resolveTradeOutcome(t1!.id, TradeOutcome.WIN, '1.2500');
 
     const assetStats = analyticsEngine.getAssetAnalytics();
