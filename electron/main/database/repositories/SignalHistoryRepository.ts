@@ -18,7 +18,17 @@ export interface EnrichedSignalRecord extends DecisionRecord {
 }
 
 export class SignalHistoryRepository {
+  private readonly runtimeSignalIds = new Set<string>();
+  private static readonly RUNTIME_ID_LIMIT = 2000;
+
   constructor(private db: Database) {}
+
+  private rememberSignalId(id: string): void {
+    this.runtimeSignalIds.add(id);
+    if (this.runtimeSignalIds.size <= SignalHistoryRepository.RUNTIME_ID_LIMIT) return;
+    const oldest = this.runtimeSignalIds.values().next().value;
+    if (typeof oldest === 'string') this.runtimeSignalIds.delete(oldest);
+  }
 
   private ensureSession(sessionId: string, startedAt: number = Date.now()): void {
     this.db.prepare(
@@ -28,6 +38,7 @@ export class SignalHistoryRepository {
   }
 
   record(record: DecisionRecord): void {
+    if (this.runtimeSignalIds.has(record.id)) return;
     this.db.transaction(() => {
       this.ensureSession(record.sessionId, record.timestamp);
       this.db.prepare(
@@ -46,9 +57,11 @@ export class SignalHistoryRepository {
         record.recommendedExpiry, record.outcome,
       );
     });
+    this.rememberSignalId(record.id);
   }
 
   recordEnriched(record: EnrichedSignalRecord): void {
+    if (this.runtimeSignalIds.has(record.id)) return;
     this.db.transaction(() => {
       this.ensureSession(record.sessionId, record.timestamp);
       this.db.prepare(
@@ -70,6 +83,7 @@ export class SignalHistoryRepository {
         record.entryContext,
       );
     });
+    this.rememberSignalId(record.id);
   }
 
   recordManualTrade(input: ManualTradeInput): void {
@@ -85,11 +99,9 @@ export class SignalHistoryRepository {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id, 'manual-journal', id, Date.now(), input.asset.trim(), input.timeframe,
-        action, action, input.reason || 'Manually logged trade',
-        input.reason || 'Manually logged trade',
-        Math.max(0, Math.min(1, input.signalStrength ?? 0)),
-        input.risk || RiskLevel.MEDIUM, QualityLevel.HIGH,
-        action === TradingAction.BUY ? 'BULLISH' : 'BEARISH',
+        action, action, input.reason || 'Manually logged trade', input.reason || 'Manually logged trade',
+        Math.max(0, Math.min(1, input.signalStrength ?? 0)), input.risk || RiskLevel.MEDIUM,
+        QualityLevel.HIGH, action === TradingAction.BUY ? 'BULLISH' : 'BEARISH',
         input.recommendedExpiry || null, input.outcome,
       );
     });
@@ -119,23 +131,7 @@ export class SignalHistoryRepository {
               recommended_expiry, outcome, confidence, market_regime
        FROM signal_history ${whereClause}
        ORDER BY timestamp DESC LIMIT ? OFFSET ?`
-    ).all(...params, query.limit ?? 50, query.offset ?? 0) as Array<{
-      id: string;
-      session_id: string;
-      timestamp: number;
-      asset: string | null;
-      timeframe: string | null;
-      raw_decision: string;
-      stabilized_decision: string;
-      signal_strength: number;
-      risk: string;
-      data_quality: string;
-      reason: string;
-      recommended_expiry: string | null;
-      outcome: string | null;
-      confidence: number | null;
-      market_regime: string | null;
-    }>;
+    ).all(...params, query.limit ?? 50, query.offset ?? 0) as Array<any>;
 
     return rows.map((row) => ({
       id: row.id,

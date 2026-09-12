@@ -13,6 +13,13 @@ export interface PreparedStatement {
   all(...params: unknown[]): unknown[];
 }
 
+export interface DatabasePersistenceMetrics {
+  completedSaves: number;
+  skippedNoopTransactions: number;
+  lastSaveDurationMs: number;
+  dirty: boolean;
+}
+
 export class Database {
   private db: SqlJsDatabase | null = null;
   private readonly dbPath: string;
@@ -21,7 +28,14 @@ export class Database {
   private mutationVersion = 0;
   private persistedVersion = 0;
   private inTransaction = false;
+  private transactionDirty = false;
   private skipBackupOnNextSave = false;
+  private lastBackupAt = 0;
+  private completedSaves = 0;
+  private skippedNoopTransactions = 0;
+  private lastSaveDurationMs = 0;
+  private static readonly SAVE_DEBOUNCE_MS = 1500;
+  private static readonly BACKUP_MIN_INTERVAL_MS = 30000;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -78,6 +92,15 @@ export class Database {
     return this.dbPath;
   }
 
+  getPersistenceMetrics(): DatabasePersistenceMetrics {
+    return {
+      completedSaves: this.completedSaves,
+      skippedNoopTransactions: this.skippedNoopTransactions,
+      lastSaveDurationMs: this.lastSaveDurationMs,
+      dirty: this.isDirty,
+    };
+  }
+
   private getBackupPath(): string {
     return `${this.dbPath}.bak`;
   }
@@ -85,6 +108,15 @@ export class Database {
   private markDirty(): void {
     this.isDirty = true;
     this.mutationVersion += 1;
+  }
+
+  private noteMutation(changes: number = 1): void {
+    if (changes <= 0) return;
+    if (this.inTransaction) {
+      this.transactionDirty = true;
+      return;
+    }
+    this.scheduleSave();
   }
 
   scheduleSave(): void {
@@ -95,10 +127,14 @@ export class Database {
       this.flushAsync().catch((error) => {
         console.error('[MARS DB] Scheduled atomic save failed:', error);
       });
-    }, 1000);
+    }, Database.SAVE_DEBOUNCE_MS);
   }
 
   async flushAsync(): Promise<void> {
+    // Give renderer/IPC work a chance to paint before sql.js performs its
+    // unavoidable synchronous memory export. No-op transactions never reach
+    // this path, which removes the former periodic freeze source.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     this.saveToFile();
   }
 
@@ -109,16 +145,16 @@ export class Database {
       this.saveTimer = null;
     }
 
+    const startedAt = Date.now();
     const snapshotVersion = this.mutationVersion;
     const buffer = Buffer.from(this.db.export());
-    // sql.js reopens the in-memory database during export(), which resets
-    // connection-scoped PRAGMAs. Reinstate FK enforcement before any caller
-    // can run another statement.
     this.db.exec('PRAGMA foreign_keys = ON;');
     try {
       this.atomicReplace(buffer);
       this.persistedVersion = snapshotVersion;
       this.isDirty = this.persistedVersion < this.mutationVersion;
+      this.completedSaves++;
+      this.lastSaveDurationMs = Math.max(0, Date.now() - startedAt);
     } catch (error) {
       this.isDirty = true;
       console.error('[MARS DB] Atomic database save failed:', error);
@@ -127,15 +163,8 @@ export class Database {
   }
 
   private flushFileToDisk(filePath: string): void {
-    // Windows requires a writable handle for FlushFileBuffers/fsync. Opening
-    // the just-written snapshot with "r" causes EPERM on GitHub-hosted and
-    // normal Windows machines even though the same operation works on POSIX.
     const descriptor = fs.openSync(filePath, process.platform === 'win32' ? 'r+' : 'r');
-    try {
-      fs.fsyncSync(descriptor);
-    } finally {
-      fs.closeSync(descriptor);
-    }
+    try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
   }
 
   private atomicReplace(buffer: Buffer): void {
@@ -149,9 +178,14 @@ export class Database {
       fs.writeFileSync(tempPath, buffer);
       this.flushFileToDisk(tempPath);
 
-      if (fs.existsSync(this.dbPath) && !this.skipBackupOnNextSave) {
+      const now = Date.now();
+      const shouldRefreshBackup = fs.existsSync(this.dbPath)
+        && !this.skipBackupOnNextSave
+        && (!fs.existsSync(backupPath) || now - this.lastBackupAt >= Database.BACKUP_MIN_INTERVAL_MS);
+      if (shouldRefreshBackup) {
         fs.copyFileSync(this.dbPath, backupPath);
         this.flushFileToDisk(backupPath);
+        this.lastBackupAt = now;
       }
 
       try {
@@ -164,9 +198,7 @@ export class Database {
           fs.renameSync(tempPath, this.dbPath);
           fs.unlinkSync(stalePath);
         } catch (secondError) {
-          if (!fs.existsSync(this.dbPath) && fs.existsSync(stalePath)) {
-            fs.renameSync(stalePath, this.dbPath);
-          }
+          if (!fs.existsSync(this.dbPath) && fs.existsSync(stalePath)) fs.renameSync(stalePath, this.dbPath);
           throw secondError;
         }
       }
@@ -199,7 +231,7 @@ export class Database {
       run: (...params: unknown[]) => {
         db.run(sql, params as any);
         const changes = db.getRowsModified();
-        if (!this.inTransaction && changes > 0) this.scheduleSave();
+        this.noteMutation(changes);
         return { changes };
       },
       get: (...params: unknown[]) => {
@@ -227,13 +259,14 @@ export class Database {
 
   exec(sql: string): void {
     this.getDb().exec(sql);
-    if (!this.inTransaction) this.scheduleSave();
+    this.noteMutation();
   }
 
   transaction<T>(fn: () => T): T {
     const isOuter = !this.inTransaction;
     if (isOuter) {
       this.inTransaction = true;
+      this.transactionDirty = false;
       try {
         this.getDb().exec('BEGIN TRANSACTION');
       } catch (error) {
@@ -248,18 +281,22 @@ export class Database {
         throw new Error('[Database] transaction() supports synchronous operations only.');
       }
       if (isOuter) {
+        const changed = this.transactionDirty;
         try {
           this.getDb().exec('COMMIT');
         } finally {
           this.inTransaction = false;
+          this.transactionDirty = false;
         }
-        this.scheduleSave();
+        if (changed) this.scheduleSave();
+        else this.skippedNoopTransactions++;
       }
       return result;
     } catch (error) {
       if (isOuter) {
         try { this.getDb().exec('ROLLBACK'); } catch {}
         this.inTransaction = false;
+        this.transactionDirty = false;
       }
       throw error;
     }
@@ -275,9 +312,8 @@ export class Database {
   }
 
   saveOverlayBounds(panelId: string, x: number, y: number, width: number, height: number): void {
-    this.prepare(
-      'INSERT OR REPLACE INTO overlay_positions (panel_id, x, y, width, height) VALUES (?, ?, ?, ?, ?)'
-    ).run(panelId, x, y, width, height);
+    this.prepare('INSERT OR REPLACE INTO overlay_positions (panel_id, x, y, width, height) VALUES (?, ?, ?, ?, ?)')
+      .run(panelId, x, y, width, height);
   }
 
   getOverlayBounds(panelId?: string): unknown {
@@ -299,19 +335,12 @@ export class Database {
     const db = this.getDb();
     const quickCheck = db.exec('PRAGMA quick_check;')[0]?.values?.[0]?.[0];
     if (quickCheck !== 'ok') throw new Error(`SQLite quick_check failed: ${String(quickCheck)}`);
-
     const foreignKeys = db.exec('PRAGMA foreign_keys;')[0]?.values?.[0]?.[0];
     if (Number(foreignKeys) !== 1) throw new Error('SQLite foreign key enforcement is disabled.');
-
-    const foreignKeyViolations = db.exec('PRAGMA foreign_key_check;');
-    if (foreignKeyViolations.some((result) => result.values.length > 0)) {
-      throw new Error('SQLite foreign key integrity check failed.');
-    }
-
+    const violations = db.exec('PRAGMA foreign_key_check;');
+    if (violations.some((result) => result.values.length > 0)) throw new Error('SQLite foreign key integrity check failed.');
     for (const indexName of ['idx_tracked_trades_signal_unique', 'idx_tracked_trades_execution_unique']) {
-      const row = this.prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?"
-      ).get(indexName) as { name: string } | undefined;
+      const row = this.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get(indexName) as { name: string } | undefined;
       if (!row) throw new Error(`Required database index is missing: ${indexName}`);
     }
   }
@@ -325,7 +354,6 @@ export class Database {
     `);
     const currentVersion = this.getCurrentVersion();
     if (currentVersion >= 6) return;
-
     this.transaction(() => {
       if (currentVersion < 1) this.migrateV1();
       if (currentVersion < 2) this.migrateV2();
@@ -337,25 +365,19 @@ export class Database {
   }
 
   private getCurrentVersion(): number {
-    const row = this.prepare('SELECT MAX(version) as version FROM schema_migrations').get() as
-      | { version: number | null }
-      | undefined;
+    const row = this.prepare('SELECT MAX(version) as version FROM schema_migrations').get() as { version: number | null } | undefined;
     return row?.version ?? 0;
   }
 
   private recordMigration(version: number): void {
-    this.prepare(
-      'INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)'
-    ).run(version, Date.now());
+    this.prepare('INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(version, Date.now());
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
     const safeTable = table.replace(/"/g, '""');
     const safeColumn = column.replace(/"/g, '""');
     const info = this.prepare(`PRAGMA table_info("${safeTable}")`).all() as Array<{ name: string }>;
-    if (!info.some((item) => item.name === column)) {
-      this.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeColumn}" ${definition}`);
-    }
+    if (!info.some((item) => item.name === column)) this.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeColumn}" ${definition}`);
   }
 
   private migrateV1(): void {
