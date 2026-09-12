@@ -65,6 +65,17 @@ describe('runtime user-facing consistency', () => {
     expect(performance).toContain("avgConfNum === null ? '—'");
   });
 
+  it('binds candle cache to asset and timeframe and preserves quote freshness', () => {
+    const scanner = read('electron/main/scanner/LiveScanner.ts');
+    expect(scanner).toContain('assetId: string | null;');
+    expect(scanner).toContain('timeframeKey: string | null;');
+    expect(scanner).toContain('contextKey !== this.marketContextKey');
+    expect(scanner).toContain('expectedGeneration !== this.marketContextGeneration');
+    expect(scanner).toContain('timestamp: observedAt');
+    expect(scanner).toContain('freshness: computeFreshness(observedAt, now)');
+    expect(scanner).toContain('getActiveMarketSnapshot(2200)');
+  });
+
   it('uses visible quote nodes and unique expiry correlation', () => {
     const detector = read('electron/main/view/embeddedTradeDetector.ts');
     expect(detector).toContain('getBoundingClientRect');

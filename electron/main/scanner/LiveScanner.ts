@@ -54,15 +54,20 @@ export class LiveScanner {
     region: ChartRegion;
     cropRatio: number;
     capturedAt: number;
+    assetId: string | null;
+    timeframeKey: string | null;
+    generation: number;
   } | null = null;
   private backgroundCapturePending = false;
+  private marketContextKey: string | null = null;
+  private marketContextGeneration = 0;
 
   async scanOnce(sessionId: SessionId, _overlayBounds?: ScreenRect): Promise<ScanResult> {
     const diagnosticsTracker = new DiagnosticsTracker();
     this.scanCount++;
 
     try {
-      const snapshot = this.captureService.getActiveMarketSnapshot(3500);
+      const snapshot = this.captureService.getActiveMarketSnapshot(2200);
       const sourceTitle = snapshot?.title || this.captureService.getActiveSourceName() || '';
       const snapshotAsset = snapshot?.asset ? this.ocrService.cleanAssetText(snapshot.asset) : null;
       const titleAsset = snapshotAsset || this.ocrService.cleanAssetText(sourceTitle);
@@ -74,12 +79,28 @@ export class LiveScanner {
       if (snapshot?.timeframe) this.ocrService.extractTimeframeFromText(snapshot.timeframe);
 
       const now = Date.now();
+      const quoteObservedAt = snapshot?.observedAt ?? now;
+      const activeAssetId = normalizeAsset(titleAsset, quoteObservedAt)?.assetId || null;
+      const activeTimeframeKey = snapshot?.timeframe?.trim().toLowerCase() || null;
+      const contextKey = activeAssetId ? `${activeAssetId}|${activeTimeframeKey || 'UNKNOWN'}` : null;
+      if (contextKey && this.marketContextKey && contextKey !== this.marketContextKey) {
+        this.marketContextGeneration++;
+        this.candleCache = null;
+      }
+      if (contextKey) this.marketContextKey = contextKey;
+      const contextGeneration = this.marketContextGeneration;
       const cacheAge = this.candleCache ? now - this.candleCache.capturedAt : Number.POSITIVE_INFINITY;
-      const cacheUsable = !!this.candleCache && cacheAge <= LiveScanner.CANDLE_CACHE_MAX_AGE_MS;
+      const cacheMatchesContext = !!this.candleCache
+        && this.candleCache.assetId === activeAssetId
+        && this.candleCache.timeframeKey === activeTimeframeKey
+        && this.candleCache.generation === contextGeneration;
+      const cacheUsable = cacheMatchesContext && cacheAge <= LiveScanner.CANDLE_CACHE_MAX_AGE_MS;
 
       if (titleAsset && titlePrice !== null && cacheUsable) {
         this.consecutiveQuoteMisses = 0;
-        if (cacheAge >= LiveScanner.HEAVY_SCAN_INTERVAL_MS) this.scheduleBackgroundCapture(sessionId);
+        if (cacheAge >= LiveScanner.HEAVY_SCAN_INTERVAL_MS) {
+          this.scheduleBackgroundCapture(sessionId, activeAssetId, activeTimeframeKey, contextGeneration);
+        }
         return this.buildFastObservation(
           sessionId,
           sourceTitle,
@@ -88,21 +109,19 @@ export class LiveScanner {
           snapshot ? DataSource.DOM_BODY : DataSource.DOM_TITLE,
           diagnosticsTracker,
           now,
+          quoteObservedAt,
+          snapshot?.timeframe || null,
         );
       }
 
       const heavy = await this.captureAndAnalyze(sessionId, diagnosticsTracker);
       if (!heavy) return { observation: null, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
+      if (contextKey && (contextGeneration !== this.marketContextGeneration || contextKey !== this.marketContextKey)) {
+        diagnosticsTracker.recordStage(ScannerStage.OBSERVATION, StageStatus.FAIL, 'Discarded capture from a previous market context');
+        return { observation: null, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
+      }
       const { frame, region, cropRatio, candleResult } = heavy;
       const candleCount = candleResult.validatedCandleCount || 0;
-
-      this.candleCache = {
-        candles: candleResult.candles || [],
-        candleQuality: candleResult.candleQuality || QualityLevel.ACCEPTABLE,
-        region,
-        cropRatio,
-        capturedAt: Date.now(),
-      };
 
       const snapshotText = snapshot
         ? [snapshot.asset, snapshot.price !== null ? `Price: ${snapshot.price}` : '', snapshot.timeframe, snapshot.platformMode]
@@ -123,6 +142,18 @@ export class LiveScanner {
       const cleanAsset = extractedAsset || (typeof ocrResults?.asset === 'string' ? ocrResults.asset : null);
       const cleanTimeframe = extractedTimeframe || (typeof ocrResults?.timeframe === 'string' ? ocrResults.timeframe : null);
       const cleanPrice = extractedPrice ?? (typeof ocrResults?.currentPrice === 'number' ? ocrResults.currentPrice : null);
+      const resolvedAssetId = normalizeAsset(cleanAsset, quoteObservedAt)?.assetId || activeAssetId;
+      const resolvedTimeframeKey = cleanTimeframe?.trim().toLowerCase() || activeTimeframeKey;
+      this.candleCache = {
+        candles: candleResult.candles || [],
+        candleQuality: candleResult.candleQuality || QualityLevel.ACCEPTABLE,
+        region,
+        cropRatio,
+        capturedAt: Date.now(),
+        assetId: resolvedAssetId,
+        timeframeKey: resolvedTimeframeKey,
+        generation: contextGeneration,
+      };
 
       if (cleanPrice === null) {
         this.consecutiveQuoteMisses++;
@@ -139,7 +170,9 @@ export class LiveScanner {
         cleanAsset ? `Asset identified: ${cleanAsset}` : 'Asset not identified',
       );
 
-      const timestamp = Date.now();
+      const timestamp = snapshot && snapshotPrice !== null && cleanPrice === snapshotPrice
+        ? snapshot.observedAt
+        : Date.now();
       const dataQuality = this.deriveDataQuality(candleCount, candleResult.candleQuality, region.confidence, cleanAsset);
       const observation: MarketObservation = {
         observationId: `obs_${frame.frameId}_${timestamp}`,
@@ -149,7 +182,7 @@ export class LiveScanner {
         asset: cleanAsset,
         assetIdentity: ocrResults?.assetIdentity || normalizeAsset(cleanAsset, timestamp),
         platformMode: snapshot?.platformMode as PlatformMode || ocrResults?.platformMode || this.ocrService.extractPlatformMode(sourceTitle || sourceText),
-        freshness: computeFreshness(timestamp),
+        freshness: computeFreshness(timestamp, Date.now()),
         source: snapshot?.price !== null && snapshot?.price !== undefined
           ? DataSource.DOM_BODY
           : titlePrice !== null ? DataSource.DOM_TITLE : sourceText ? DataSource.DOM_BODY : DataSource.OCR,
@@ -180,19 +213,29 @@ export class LiveScanner {
     }
   }
 
-  private scheduleBackgroundCapture(sessionId: SessionId): void {
+  private scheduleBackgroundCapture(
+    sessionId: SessionId,
+    expectedAssetId: string | null,
+    expectedTimeframeKey: string | null,
+    expectedGeneration: number,
+  ): void {
     if (this.backgroundCapturePending) return;
     this.backgroundCapturePending = true;
     const tracker = new DiagnosticsTracker();
+    const expectedContextKey = expectedAssetId ? `${expectedAssetId}|${expectedTimeframeKey || 'UNKNOWN'}` : null;
     void this.captureAndAnalyze(sessionId, tracker)
       .then((heavy) => {
         if (!heavy) return;
+        if (expectedGeneration !== this.marketContextGeneration || expectedContextKey !== this.marketContextKey) return;
         this.candleCache = {
           candles: heavy.candleResult.candles || [],
           candleQuality: heavy.candleResult.candleQuality || QualityLevel.ACCEPTABLE,
           region: heavy.region,
           cropRatio: heavy.cropRatio,
           capturedAt: Date.now(),
+          assetId: expectedAssetId,
+          timeframeKey: expectedTimeframeKey,
+          generation: expectedGeneration,
         };
       })
       .catch((error) => console.warn('[MARS SCANNER] Background chart refresh failed:', error))
@@ -269,8 +312,10 @@ export class LiveScanner {
     source: DataSource,
     diagnosticsTracker: DiagnosticsTracker,
     now: number,
+    observedAt: number,
+    timeframe: string | null,
   ): ScanResult {
-    const assetIdentity = this.ocrService.extractAssetIdentityFromTitle(sourceTitle || asset) || normalizeAsset(asset, now);
+    const assetIdentity = this.ocrService.extractAssetIdentityFromTitle(sourceTitle || asset) || normalizeAsset(asset, observedAt);
     this.ocrService.extractPriceFromText(`Price: ${price}`);
     const platformMode = this.ocrService.extractPlatformMode(sourceTitle);
     const cache = this.candleCache!;
@@ -286,16 +331,16 @@ export class LiveScanner {
     diagnosticsTracker.recordStage(ScannerStage.OCR, StageStatus.PASS, `Targeted quote feed: ${asset}`);
 
     const observation: MarketObservation = {
-      observationId: `obs_fast_${now}`,
+      observationId: `obs_fast_${observedAt}`,
       sessionId,
-      frameId: `fast-${now}`,
-      timestamp: now,
+      frameId: `fast-${observedAt}`,
+      timestamp: observedAt,
       asset,
       assetIdentity,
       platformMode,
-      freshness: computeFreshness(now),
+      freshness: computeFreshness(observedAt, now),
       source,
-      timeframe: null,
+      timeframe,
       currentPrice: price,
       candles: cache.candles,
       candleQuality,
@@ -362,6 +407,8 @@ export class LiveScanner {
     this.scanCount = 0;
     this.consecutiveQuoteMisses = 0;
     this.backgroundCapturePending = false;
+    this.marketContextKey = null;
+    this.marketContextGeneration++;
     this.captureService.clearCache();
     this.ocrService.clearCache();
   }
