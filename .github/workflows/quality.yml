@@ -4,11 +4,11 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, fix/trade-journal-learning-rc4]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 concurrency:
@@ -16,47 +16,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rc4-source-patch:
-    name: Apply RC4 trade pipeline patch
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/fix/trade-journal-learning-rc4' && github.actor != 'github-actions[bot]') || (github.event_name == 'pull_request' && github.head_ref == 'fix/trade-journal-learning-rc4')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: fix/trade-journal-learning-rc4
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Apply resumable source patch
-        id: patch
-        shell: bash
-        run: |
-          set +e
-          node scripts/rc4-trade-pipeline-finish.mjs 2>&1 | tee /tmp/rc4-patch.log
-          patch_status=${PIPESTATUS[0]}
-          echo "status=${patch_status}" >> "$GITHUB_OUTPUT"
-          exit 0
-      - name: Commit source progress
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add electron frontend shared tests package.json package-lock.json
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "fix: finish trade journal and ML learning repair"
-            git push origin HEAD:fix/trade-journal-learning-rc4
-          fi
-      - name: Report patch error
-        if: steps.patch.outputs.status != '0'
-        shell: bash
-        run: |
-          cat /tmp/rc4-patch.log
-          exit 1
-
   ipc-contract:
     name: IPC contract audit
     runs-on: ubuntu-latest
