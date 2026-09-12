@@ -18,12 +18,13 @@ concurrency:
 jobs:
   rc4-source-patch:
     name: Apply RC4 trade pipeline patch
-    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/trade-journal-learning-rc4' && github.actor != 'github-actions[bot]'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/fix/trade-journal-learning-rc4' && github.actor != 'github-actions[bot]') || (github.event_name == 'pull_request' && github.head_ref == 'fix/trade-journal-learning-rc4')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: fix/trade-journal-learning-rc4
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
