@@ -1,0 +1,99 @@
+name: Finalize RC3 Source
+
+on:
+  push:
+    branches: [perf/windows-render-rc3]
+    paths:
+      - .github/workflows/rc3-finalize-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/windows-render-rc3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply deterministic source updates
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const controllerPath = 'electron/main/lifecycle/AnalysisController.ts';
+          let controller = fs.readFileSync(controllerPath, 'utf8');
+          const oldLoop = `  private startScanLoop(intervalMs: number): void {
+            if (this.scanTimer) {
+              clearInterval(this.scanTimer);
+            }
+            this.scanTimer = setInterval(() => {
+              this.runScanCycle().catch((err) => {
+                console.error('[MARS] Unhandled scan cycle error:', err);
+              });
+            }, intervalMs);
+          }
+
+          private stopScanLoop(): void {
+            if (this.scanTimer) {
+              clearInterval(this.scanTimer);
+              this.scanTimer = null;
+            }
+          }`;
+          const newLoop = `  private startScanLoop(intervalMs: number): void {
+            this.stopScanLoop();
+            const scheduleNext = (): void => {
+              if (this.state !== AnalysisState.RUNNING) return;
+              this.scanTimer = setTimeout(async () => {
+                this.scanTimer = null;
+                try {
+                  await this.runScanCycle();
+                } catch (err) {
+                  console.error('[MARS] Unhandled scan cycle error:', err);
+                } finally {
+                  scheduleNext();
+                }
+              }, intervalMs);
+            };
+            scheduleNext();
+          }
+
+          private stopScanLoop(): void {
+            if (this.scanTimer) {
+              clearTimeout(this.scanTimer);
+              this.scanTimer = null;
+            }
+          }`;
+          if (!controller.includes(oldLoop)) throw new Error('Expected AnalysisController scan loop was not found.');
+          controller = controller.replace(oldLoop, newLoop);
+          fs.writeFileSync(controllerPath, controller);
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          lock.version = pkg.version;
+          if (lock.packages && lock.packages['']) lock.packages[''].version = pkg.version;
+          fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
+
+          const installerPath = '.github/workflows/windows-installer.yml';
+          let installer = fs.readFileSync(installerPath, 'utf8');
+          installer = installer
+            .replace('default: v3.0.1-rc.2', 'default: v3.0.1-rc.3')
+            .replace('MARS PRO V3 Windows startup recovery release candidate.', 'MARS PRO V3 Windows performance and startup recovery release candidate.')
+            .replace('Startup changes in rc.2:', 'Performance and startup changes in rc.3:')
+            .replace('- uses safer Windows rendering startup settings', '- uses hardware acceleration normally with crash-triggered Safe Graphics Mode\n          - adds adaptive 60/30/5 FPS rendering and targeted live quote updates\n          - moves chart pixel analysis to a worker and suppresses no-op database exports');
+          fs.writeFileSync(installerPath, installer);
+          NODE
+      - name: Commit generated updates
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add electron/main/lifecycle/AnalysisController.ts package-lock.json .github/workflows/windows-installer.yml
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'perf: serialize scan cadence and sync rc3 metadata'
+          git push origin HEAD:perf/windows-render-rc3
