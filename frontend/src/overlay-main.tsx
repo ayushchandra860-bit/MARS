@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import OverlayApp from './overlay/OverlayApp';
 import './styles/overlay.css';
+import './styles/performance.css';
 
 const urlParams = new URLSearchParams(window.location.search);
 const panel = urlParams.get('panel');

@@ -1,0 +1,62 @@
+/* MARS PRO V3 performance profile.
+   Keeps trading colors and hierarchy while removing continuous repaints. */
+
+:root {
+  --font-main: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  --font-heading: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  --font-mono: Consolas, 'Courier New', monospace;
+}
+
+.app-sidebar,
+.glass-panel,
+.status-chip {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+.glass-panel,
+.nav-item.active,
+.ai-core-container,
+.ai-core-ring-outer,
+.ai-core-ring-middle,
+.ai-core-center.running,
+.dot.pulsating::after,
+.detail-row,
+.reason-item {
+  animation: none !important;
+}
+
+.glass-panel {
+  background: rgba(15, 23, 42, 0.96) !important;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.32) !important;
+}
+
+.overlay-panel {
+  contain: layout paint;
+  transform: none !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.52), 0 0 14px rgba(0, 229, 255, 0.06) !important;
+}
+
+.overlay-panel::before {
+  opacity: 0.55 !important;
+}
+
+.overlay-panel::after {
+  opacity: 0.08 !important;
+}
+
+.decision-box,
+.info-grid,
+.analysis-cell,
+.strength-bar-fill {
+  will-change: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.08s !important;
+  }
+}
