@@ -11,10 +11,11 @@ describe('pixel-analysis worker', () => {
     const width = 320;
     const height = 200;
     const buffer = Buffer.alloc(width * height * 4);
+    // Draw deterministic candles in the worker's lower chart crop.
     for (let candle = 0; candle < 10; candle++) {
       const startX = 24 + candle * 26;
       for (let x = startX; x < startX + 7; x++) {
-        for (let y = 28 + (candle % 3); y < 72 + (candle % 5); y++) {
+        for (let y = 82 + (candle % 3); y < 136 + (candle % 5); y++) {
           const offset = (y * width + x) * 4;
           buffer[offset] = 83;
           buffer[offset + 1] = 200;
