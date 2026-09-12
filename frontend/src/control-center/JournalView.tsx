@@ -354,7 +354,11 @@ export default function JournalView() {
         )}
       </div>
 
-      {/* Journal Table */}
+      <div style={{ fontSize: '11px', fontWeight: 800, color: 'var(--text-muted)', letterSpacing: '0.6px', margin: '4px 0 10px' }}>
+        ML-ELIGIBLE CALIBRATION SNAPSHOTS ONLY
+      </div>
+
+      {/* Strict calibration sample table; the complete execution ledger is above. */}
       <GlassPanel style={{ padding: 0 }}>
         {loading ? (
           <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>

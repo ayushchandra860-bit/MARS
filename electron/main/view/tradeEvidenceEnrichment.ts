@@ -49,11 +49,12 @@ export function enrichBrowserTradeClick(
   const entryPrice = validPrice(click.entryPrice)
     ? click.entryPrice
     : validPrice(snapshot.price) ? snapshot.price : null;
+  const snapshotMode = String(snapshot.platformMode);
   const platformMode: PlatformMode = click.platformMode !== PlatformMode.UNKNOWN
     ? click.platformMode
-    : snapshot.platformMode === PlatformMode.LIVE || snapshot.platformMode === 'LIVE'
+    : snapshotMode === PlatformMode.LIVE
       ? PlatformMode.LIVE
-      : snapshot.platformMode === PlatformMode.DEMO || snapshot.platformMode === 'DEMO'
+      : snapshotMode === PlatformMode.DEMO
         ? PlatformMode.DEMO
         : PlatformMode.UNKNOWN;
 

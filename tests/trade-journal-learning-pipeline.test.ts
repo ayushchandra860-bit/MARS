@@ -90,6 +90,20 @@ describe('trade journal and verified learning pipeline', () => {
     expect(MLEngine.getInstance().getSampleCount('EUR/USD')).toBe(1);
   });
 
+  it('does not train the LIVE model from DEMO or UNKNOWN-mode outcomes', () => {
+    const features = new Array(FEATURE_NAMES.length).fill(0.4);
+    for (const [index, platformMode] of [PlatformMode.DEMO, PlatformMode.UNKNOWN].entries()) {
+      const trade = manager.registerTrade({
+        sessionId: 'excluded-session', signalId: `excluded-signal-${index}`,
+        eventId: `excluded-click-${index}`, asset: 'EUR/USD', direction: TradingAction.BUY,
+        entryPrice: '1.0800', platformMode, confidence: 0.65, mlFeatures: features,
+      });
+      expect(trade).not.toBeNull();
+      expect(manager.resolveTradeOutcome(trade!.id, TradeOutcome.WIN, '1.0810')).toBe(true);
+    }
+    expect(MLEngine.getInstance().getSampleCount('EUR/USD')).toBe(0);
+  });
+
   it('uses a result-time quote only for a fresh exact-asset correlation', () => {
     const trade = { asset: 'EUR/USD' } as any;
     const now = Date.now();

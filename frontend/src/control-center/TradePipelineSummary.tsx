@@ -17,7 +17,7 @@ export default function TradePipelineSummary() {
 
   const refresh = useCallback(async () => {
     const [nextHistory, nextStats, nextLearning] = await Promise.all([
-      invokeIpc<HistoryEntry[]>(IPC_INVOKE_CHANNELS.GET_HISTORY, { limit: 500 }),
+      invokeIpc<HistoryEntry[]>(IPC_INVOKE_CHANNELS.GET_HISTORY, { limit: 1000 }),
       invokeIpc<PerformanceStats>(IPC_INVOKE_CHANNELS.GET_PERFORMANCE_STATS),
       invokeIpc<LearningStatus>(IPC_INVOKE_CHANNELS.GET_MODEL_READINESS_SCORE),
     ]);
@@ -32,13 +32,13 @@ export default function TradePipelineSummary() {
 
   const registered = stats?.registeredTradeCount ?? history.length;
   const completed = stats?.totalCompleted ?? history.filter((trade) => Boolean(trade.outcome)).length;
-  const active = stats?.activeTradeCount ?? history.filter((trade) => !trade.outcome).length;
+  const unresolved = stats?.unresolvedTradeCount ?? stats?.activeTradeCount ?? history.filter((trade) => !trade.outcome).length;
   const samples = learning?.sampleSize ?? 0;
-  const recent = history.slice(0, 12);
+  const ledger = history;
 
   const cards = [
     { label: 'REGISTERED TRADES', value: registered, color: 'var(--accent-cyan)' },
-    { label: 'ACTIVE / UNRESOLVED', value: active, color: 'var(--color-amber)' },
+    { label: 'ACTIVE / UNRESOLVED', value: unresolved, color: 'var(--color-amber)' },
     { label: 'COMPLETED OUTCOMES', value: completed, color: 'var(--color-emerald)' },
     { label: 'ML CLEAN SAMPLES', value: samples, color: 'var(--accent-violet)' },
   ];
@@ -61,16 +61,24 @@ export default function TradePipelineSummary() {
         ))}
       </div>
 
-      <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: recent.length ? '12px' : 0 }}>
-        Har captured trade ledger me dikhna chahiye. ML me sirf verified <strong>LIVE</strong> WIN/LOSS trade jayega jisme valid asset, entry/exit quote aur feature snapshot ho. DEMO, UNKNOWN ya unresolved trades ledger me dikhenge, par LIVE model ko contaminate nahi karenge.
+      <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: ledger.length ? '12px' : 0 }}>
+        Har captured trade neeche authoritative ledger me dikhega. ML me sirf verified <strong>LIVE</strong> WIN/LOSS trade jayega jisme valid asset, entry/exit quote aur 11-feature snapshot ho. DEMO, UNKNOWN, unresolved, stale ya mismatched trades ledger me rahenge, par LIVE model ko contaminate nahi karenge.
       </div>
 
-      {recent.length > 0 && (
-        <div style={{ overflowX: 'auto' }}>
+      {ledger.length === 0 ? (
+        <div style={{ padding: '18px 0 6px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px' }}>
+          NO CAPTURED EXECUTIONS YET
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 800, letterSpacing: '0.6px', marginBottom: '8px' }}>
+            AUTHORITATIVE TRADE LEDGER · {ledger.length} LOADED
+          </div>
+          <div style={{ overflow: 'auto', maxHeight: '440px' }}>
           <table className="terminal-table">
             <thead><tr><th>TIME</th><th>ASSET</th><th>MODE</th><th>ACTION</th><th>STATE</th><th>RESULT</th></tr></thead>
             <tbody>
-              {recent.map((trade) => (
+              {ledger.map((trade) => (
                 <tr key={trade.id}>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: '10px' }}>{new Date(trade.timestamp).toLocaleTimeString()}</td>
                   <td style={{ fontWeight: 700 }}>{trade.asset || 'UNRESOLVED ASSET'}</td>
@@ -81,8 +89,9 @@ export default function TradePipelineSummary() {
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
+            </table>
+          </div>
+        </>
       )}
     </GlassPanel>
   );
