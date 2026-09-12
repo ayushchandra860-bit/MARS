@@ -14,6 +14,8 @@ export class OverlayManager {
   private isVisible = true;
   private savedPositions = new Map<string, OverlayPosition>();
   private latestPayload: any = null;
+  private latestSemanticFingerprint = '';
+  private latestQuoteAt = 0;
 
   public createWindows(): void {
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) return;
@@ -48,10 +50,13 @@ export class OverlayManager {
         contextIsolation: true,
         sandbox: true,
         webSecurity: true,
+        backgroundThrottling: false,
       },
     });
 
     const window = this.overlayWindow;
+    try { window.webContents.setBackgroundThrottling(false); } catch {}
+    window.webContents.setFrameRate(30);
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-attach-webview', (event) => event.preventDefault());
     const guardNavigation = (event: Electron.Event, targetUrl: string) => {
@@ -92,6 +97,7 @@ export class OverlayManager {
     if (!this.overlayWindow || this.overlayWindow.isDestroyed()) this.createWindows();
     const window = this.overlayWindow;
     if (window && !window.isDestroyed()) {
+      window.webContents.setFrameRate(30);
       window.showInactive();
       window.setAlwaysOnTop(true, 'screen-saver');
       window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -100,7 +106,10 @@ export class OverlayManager {
 
   public hide(): void {
     this.isVisible = false;
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) this.overlayWindow.hide();
+    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.webContents.setFrameRate(5);
+      this.overlayWindow.hide();
+    }
   }
 
   public savePosition(position: OverlayPosition): void {
@@ -109,6 +118,32 @@ export class OverlayManager {
 
   public getPositions(): OverlayPosition[] {
     return Array.from(this.savedPositions.values());
+  }
+
+  public sendQuote(snapshot: {
+    asset: string | null;
+    price: number | null;
+    timeframe: string | null;
+    platformMode: 'DEMO' | 'LIVE' | 'UNKNOWN';
+    observedAt: number;
+  }): void {
+    if (!snapshot || Date.now() - snapshot.observedAt > 5000) return;
+    const nextPrice = typeof snapshot.price === 'number' && Number.isFinite(snapshot.price) && snapshot.price > 0
+      ? String(snapshot.price)
+      : null;
+    const patch: Record<string, unknown> = {
+      lastUpdate: snapshot.observedAt,
+      platformMode: snapshot.platformMode,
+    };
+    if (snapshot.asset) patch.asset = snapshot.asset;
+    if (snapshot.timeframe) patch.timeframe = snapshot.timeframe;
+    if (nextPrice !== null) patch.currentPrice = nextPrice;
+
+    const quoteKey = `${patch.asset || this.latestPayload?.asset || ''}|${patch.currentPrice || this.latestPayload?.currentPrice || ''}|${patch.timeframe || ''}|${patch.platformMode || ''}`;
+    if (quoteKey === this.latestPayload?.__quoteKey && snapshot.observedAt - this.latestQuoteAt < 900) return;
+    this.latestQuoteAt = snapshot.observedAt;
+    this.latestPayload = { ...(this.latestPayload || {}), ...patch, __quoteKey: quoteKey };
+    this.sendPayload(patch);
   }
 
   public sendState(state: OverlayState, livePayload?: any): void {
@@ -154,30 +189,31 @@ export class OverlayManager {
       lastUpdate: Date.now(),
     };
 
-    if (this.latestPayload && !unified.soundAlert) {
-      const previous = this.latestPayload;
-      if (Date.now() - (previous.lastUpdate || 0) < 1000
-        && previous.decision === unified.decision
-        && previous.asset === unified.asset
-        && previous.currentPrice === unified.currentPrice
-        && previous.entryGuidance === unified.entryGuidance
-        && previous.entryCountdownSec === unified.entryCountdownSec
-        && previous.confidence === unified.confidence
-        && previous.recommendedExpiry === unified.recommendedExpiry
-        && previous.analysisState === unified.analysisState
-        && previous.systemStatus === unified.systemStatus
-        && JSON.stringify(previous.activeTradeContext) === JSON.stringify(unified.activeTradeContext)) return;
-    }
+    const trade = unified.activeTradeContext;
+    const fingerprint = JSON.stringify([
+      unified.decision, unified.asset, unified.currentPrice, unified.timeframe,
+      unified.entryGuidance, unified.entryCountdownSec, unified.confidence,
+      unified.recommendedExpiry, unified.analysisState, unified.systemStatus,
+      unified.signalStatus, unified.tradeStatus, unified.reason, unified.reasons,
+      unified.marketRegime, unified.trend, unified.momentum, unified.volatility,
+      trade?.signalId, trade?.remainingSeconds, trade?.status, trade?.tradeStatus,
+    ]);
+    if (!unified.soundAlert && fingerprint === this.latestSemanticFingerprint) return;
+    this.latestSemanticFingerprint = fingerprint;
+    this.latestPayload = { ...(this.latestPayload || {}), ...unified };
+    this.sendPayload(unified);
+  }
 
-    this.latestPayload = unified;
+  private sendPayload(payload: unknown): void {
     if (!this.isVisible) return;
     const window = this.overlayWindow;
     if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
     if (!window.isVisible()) {
+      window.webContents.setFrameRate(30);
       window.showInactive();
       window.setAlwaysOnTop(true, 'screen-saver');
     }
-    window.webContents.send(IPC_CHANNELS.OVERLAY_STATE_UPDATE, unified);
+    window.webContents.send(IPC_CHANNELS.OVERLAY_STATE_UPDATE, payload);
   }
 
   public getIsVisible(): boolean { return this.isVisible; }
@@ -187,5 +223,7 @@ export class OverlayManager {
     this.isVisible = false;
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) this.overlayWindow.destroy();
     this.overlayWindow = null;
+    this.latestPayload = null;
+    this.latestSemanticFingerprint = '';
   }
 }

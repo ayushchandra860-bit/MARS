@@ -1,6 +1,8 @@
 /**
  * Runs only inside an allowlisted Olymp Trade top-level page. It emits compact,
  * schema-validated console envelopes consumed by EmbeddedBrowserManager.
+ * Market quotes use targeted selectors and a bounded heartbeat; no body.innerText
+ * scan is performed in the live path.
  */
 export function buildEmbeddedTradeDetectorScript(): string {
   return `
@@ -60,6 +62,34 @@ export function buildEmbeddedTradeDetectorScript(): string {
     if (/\\b(LIVE|REAL)\\b/.test(normalized)) return 'LIVE';
     return 'UNKNOWN';
   }
+
+  var lastMarketKey = '';
+  var lastMarketEmitAt = 0;
+  function emitMarketSnapshot(force) {
+    try {
+      var now = Date.now();
+      var minInterval = document.hidden ? 1000 : 200;
+      if (!force && now - lastMarketEmitAt < minInterval) return;
+      var asset = detectAsset(document);
+      var price = detectPrice(document);
+      var timeframe = detectExpiry(document);
+      var platformMode = detectPlatformMode();
+      if (!asset && price === null) return;
+      var key = [asset, price, timeframe, platformMode].join('|');
+      if (!force && key === lastMarketKey && now - lastMarketEmitAt < 1000) return;
+      lastMarketKey = key;
+      lastMarketEmitAt = now;
+      console.log('[MARS_MARKET_SNAPSHOT]:' + JSON.stringify({
+        asset: asset || null,
+        price: price,
+        timeframe: timeframe || null,
+        platformMode: platformMode,
+        title: String(document.title || '').slice(0, 300),
+        observedAt: now
+      }));
+    } catch (_) {}
+  }
+
   function makeId() {
     try { if (crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID(); } catch (_) {}
     return 'ot-' + Date.now() + '-' + Math.random().toString(36).slice(2, 12);
@@ -147,30 +177,52 @@ export function buildEmbeddedTradeDetectorScript(): string {
       timestamp: now
     }));
   }
+  function inspectResultElement(element) {
+    if (!element || element.nodeType !== 1) return false;
+    var text = textOf(element);
+    var match = text.match(signedAmount);
+    if (match) { emitResult(element, text, match); return true; }
+    return false;
+  }
   function scanForResult(root) {
     try {
       if (!root || !root.querySelectorAll) return;
       for (var s = 0; s < resultSelectors.length; s++) {
+        if (root.matches && root.matches(resultSelectors[s]) && inspectResultElement(root)) return;
         var elements = root.querySelectorAll(resultSelectors[s]);
         for (var i = 0; i < elements.length; i++) {
-          var text = textOf(elements[i]);
-          var match = text.match(signedAmount);
-          if (match) { emitResult(elements[i], text, match); return; }
+          if (inspectResultElement(elements[i])) return;
         }
       }
     } catch (_) {}
   }
 
+  var queuedResultRoots = [];
+  var resultScanTimer = null;
+  function queueResultScan(root) {
+    if (!root || root.nodeType !== 1) return;
+    if (queuedResultRoots.length < 25) queuedResultRoots.push(root);
+    if (resultScanTimer !== null) return;
+    resultScanTimer = setTimeout(function () {
+      var roots = queuedResultRoots.splice(0, queuedResultRoots.length);
+      resultScanTimer = null;
+      for (var i = 0; i < roots.length; i++) scanForResult(roots[i]);
+    }, 100);
+  }
+
   try {
     var observer = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i++) {
-        for (var n = 0; n < mutations[i].addedNodes.length; n++) {
-          if (mutations[i].addedNodes[n].nodeType === 1) scanForResult(mutations[i].addedNodes[n]);
-        }
+        for (var n = 0; n < mutations[i].addedNodes.length; n++) queueResultScan(mutations[i].addedNodes[n]);
       }
     });
     observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
-  setInterval(function () { scanForResult(document); }, 2000);
+
+  emitMarketSnapshot(true);
+  setInterval(function () { emitMarketSnapshot(false); }, 200);
+  setInterval(function () {
+    if (!document.hidden && Date.now() - lastResultAt > 5000) scanForResult(document);
+  }, 10000);
 })();`;
 }
