@@ -427,6 +427,7 @@ export interface HistoryEntry {
   timestamp: number;
   asset: string | null;
   platformMode?: PlatformMode | null;
+  tradeStatus?: string | null;
   timeframe: string | null;
   rawDecision: TradingAction;
   stabilizedDecision: TradingAction;
@@ -469,6 +470,9 @@ export interface PerformanceStats {
   allTimeLosses: number;
   allTimeWinRate: number;
   activeTradeCount: number;
+  /** Every captured execution, including active or incomplete records. */
+  registeredTradeCount?: number;
+  unresolvedTradeCount?: number;
   recentForm: ('W' | 'L' | 'D')[];
 
   // Task T2.2: Rates

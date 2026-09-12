@@ -8,6 +8,7 @@ import React, { useState, useEffect } from 'react';
 import { invokeIpc, useIpcListener } from '../hooks/useIpc';
 import { IPC_INVOKE_CHANNELS, IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
 import { GlassPanel } from '../components/GlassPanel';
+import TradePipelineSummary from './TradePipelineSummary';
 import { formatConfidence } from '../../../shared/utils/formatters';
 
 export interface CalibrationHealth {
@@ -273,6 +274,8 @@ export default function JournalView() {
           EXPORT CALIBRATION JSON ({dataset.length})
         </button>
       </div>
+
+      <TradePipelineSummary />
 
       {/* Calibration Dataset Readiness Banner */}
       <GlassPanel auroraBorder style={{ marginBottom: '20px' }}>

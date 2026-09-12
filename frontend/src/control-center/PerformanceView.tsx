@@ -80,9 +80,9 @@ export default function PerformanceView() {
           <p>Every percentage comes from real recorded outcomes — no fabricated metrics</p>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700 }}>COMPLETED TRADES</div>
+          <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700 }}>REGISTERED / COMPLETED</div>
           <div style={{ fontSize: '22px', fontWeight: 900, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>
-            {totalCompleted}
+            {stats.registeredTradeCount ?? totalCompleted} / {totalCompleted}
           </div>
         </div>
       </div>
