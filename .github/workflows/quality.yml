@@ -29,9 +29,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Apply source patch
-        run: node scripts/rc4-trade-pipeline-fix.mjs
-      - name: Commit source changes
+      - name: Apply resumable source patch
+        id: patch
+        shell: bash
+        run: |
+          set +e
+          node scripts/run-rc4-patch-resilient.mjs 2>&1 | tee /tmp/rc4-patch.log
+          patch_status=${PIPESTATUS[0]}
+          echo "status=${patch_status}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Commit source progress
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -39,10 +46,16 @@ jobs:
           git add electron frontend shared tests package.json package-lock.json .github/workflows/windows-installer.yml
           if git diff --cached --quiet; then
             echo "No changes to commit"
-            exit 0
+          else
+            git commit -m "fix: restore trade journal counting and verified learning"
+            git push origin HEAD:fix/trade-journal-learning-rc4
           fi
-          git commit -m "fix: restore trade journal counting and verified learning"
-          git push origin HEAD:fix/trade-journal-learning-rc4
+      - name: Report patch error
+        if: steps.patch.outputs.status != '0'
+        shell: bash
+        run: |
+          cat /tmp/rc4-patch.log
+          exit 1
 
   ipc-contract:
     name: IPC contract audit
