@@ -23,6 +23,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p ci-logs
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/rc3-finalize.mjs')
+          text = path.read_text()
+          old = "    const quoteKey = `${patch.asset || this.latestPayload?.asset || ''}|${patch.currentPrice || this.latestPayload?.currentPrice || ''}|${patch.timeframe || ''}|${patch.platformMode || ''}`;"
+          new = "    const quoteKey = [patch.asset || this.latestPayload?.asset || '', patch.currentPrice || this.latestPayload?.currentPrice || '', patch.timeframe || '', patch.platformMode || ''].join('|');"
+          if old not in text:
+              raise SystemExit('quoteKey source line missing')
+          path.write_text(text.replace(old, new))
+          PY
           node scripts/rc3-finalize.mjs 2>&1 | tee ci-logs/finalize.log
       - name: Commit generated updates
         shell: bash
