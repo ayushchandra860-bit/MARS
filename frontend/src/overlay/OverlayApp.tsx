@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SignalPanel from './SignalPanel';
 import { useIpcListener } from '../hooks/useIpc';
 import { IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
@@ -7,120 +7,103 @@ interface OverlayAppProps {
   panelType?: 'signal' | 'analysis';
 }
 
+function equivalentValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
+}
+
 export default function OverlayApp({ panelType = 'signal' }: OverlayAppProps) {
   const [state, setState] = useState<any>(null);
   const [visible, setVisible] = useState(true);
-  const lastSoundSignalTime = useRef<number>(0);
-  const lastPlayedState = useRef<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastSoundRef = useRef<{ type: string; at: number }>({ type: '', at: 0 });
 
-  const mergeState = (incoming: any) => {
-    if (!incoming) return;
-    setState((prev: any) => {
-      const merged = { ...prev, ...incoming };
+  const mergeState = useCallback((incoming: any) => {
+    if (!incoming || typeof incoming !== 'object') return;
+    setState((previous: any) => {
+      const prev = previous || {};
+      const normalized = { ...incoming };
       if (incoming.asset !== undefined) {
-        merged.asset = (incoming.asset && incoming.asset !== 'UNKNOWN') ? incoming.asset : null;
+        normalized.asset = incoming.asset && incoming.asset !== 'UNKNOWN' ? incoming.asset : null;
       }
-      return merged;
+
+      let meaningfulChange = previous === null;
+      for (const [key, value] of Object.entries(normalized)) {
+        if (key === 'lastUpdate') continue;
+        if (!equivalentValue(prev[key], value)) {
+          meaningfulChange = true;
+          break;
+        }
+      }
+      if (!meaningfulChange) return previous;
+      return { ...prev, ...normalized };
     });
-  };
+  }, []);
 
-  useIpcListener(IPC_CHANNELS.OVERLAY_STATE_UPDATE, (newState: unknown) => {
-    const s = newState as any;
-    mergeState(newState);
-    handleAudioAlert(s);
+  const getAudioContext = useCallback((): AudioContext | null => {
+    try {
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        const AudioCtor = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtor) return null;
+        audioContextRef.current = new AudioCtor();
+      }
+      if (audioContextRef.current.state === 'suspended') void audioContextRef.current.resume().catch(() => {});
+      return audioContextRef.current;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const playTone = useCallback((startHz: number, endHz: number, duration: number, type: OscillatorType = 'sine', delay = 0) => {
+    const context = getAudioContext();
+    if (!context) return;
+    const start = context.currentTime + delay;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(startHz, start);
+    oscillator.frequency.exponentialRampToValueAtTime(Math.max(1, endHz), start + duration * 0.48);
+    gain.gain.setValueAtTime(type === 'square' ? 0.1 : 0.18, start);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(start);
+    oscillator.stop(start + duration);
+  }, [getAudioContext]);
+
+  const handleAudioAlert = useCallback((payload: any) => {
+    if (panelType !== 'signal' || !payload?.soundAlert || payload.soundEnabled === false) return;
+    const type = String(payload.soundAlertType || '');
+    if (!type) return;
+    const now = Date.now();
+    if (lastSoundRef.current.type === type && now - lastSoundRef.current.at < 500) return;
+    lastSoundRef.current = { type, at: now };
+
+    if (type === 'BUY' && payload.soundBuyEnabled !== false) playTone(523.25, 659.25, 0.28);
+    else if (type === 'SELL' && payload.soundSellEnabled !== false) playTone(659.25, 440, 0.3);
+    else if (type === 'DETERIORATION' && payload.soundDeteriorationEnabled !== false) {
+      playTone(440, 440, 0.08, 'square');
+      playTone(440, 440, 0.08, 'square', 0.12);
+    }
+  }, [panelType, playTone]);
+
+  useIpcListener(IPC_CHANNELS.OVERLAY_STATE_UPDATE, (incoming: unknown) => {
+    mergeState(incoming);
+    handleAudioAlert(incoming);
   });
-
   useIpcListener(IPC_CHANNELS.OVERLAY_SHOW, () => setVisible(true));
   useIpcListener(IPC_CHANNELS.OVERLAY_HIDE, () => setVisible(false));
 
-  const handleAudioAlert = (s: any) => {
-    if (panelType !== 'signal' || !s || !s.soundAlert) return;
-    if (s.soundEnabled === false) return;
+  useEffect(() => () => {
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context && context.state !== 'closed') void context.close().catch(() => {});
+  }, []);
 
-    const alertType = s.soundAlertType;
-    if (!alertType) return;
-
-    if (alertType === 'BUY') {
-      if (s.soundBuyEnabled !== false) {
-        playBuyChime();
-      }
-    } else if (alertType === 'SELL') {
-      if (s.soundSellEnabled !== false) {
-        playSellChime();
-      }
-    } else if (alertType === 'DETERIORATION') {
-      if (s.soundDeteriorationEnabled !== false) {
-        playWarningChime();
-      }
-    }
-  };
-
-  // Sound 1: BUY Signal (Ascending Chime)
-  const playBuyChime = () => {
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(523.25, ctx.currentTime); // C5
-      osc.frequency.exponentialRampToValueAtTime(659.25, ctx.currentTime + 0.12); // E5
-      gain.gain.setValueAtTime(0.18, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.28);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.28);
-      setTimeout(() => { try { ctx.close().catch(() => {}); } catch {} }, 350);
-    } catch {}
-  };
-
-  // Sound 2: SELL Signal (Descending Chime)
-  const playSellChime = () => {
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(659.25, ctx.currentTime); // E5
-      osc.frequency.exponentialRampToValueAtTime(440.00, ctx.currentTime + 0.14); // A4
-      gain.gain.setValueAtTime(0.18, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.30);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.30);
-      setTimeout(() => { try { ctx.close().catch(() => {}); } catch {} }, 350);
-    } catch {}
-  };
-
-  // Sound 3: Trade Deterioration Warning (Double Beep Alert)
-  const playWarningChime = () => {
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const playPulse = (startTime: number) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(440.0, startTime);
-        gain.gain.setValueAtTime(0.10, startTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, startTime + 0.08);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(startTime);
-        osc.stop(startTime + 0.08);
-      };
-      playPulse(ctx.currentTime);
-      playPulse(ctx.currentTime + 0.12);
-      setTimeout(() => { try { ctx.close().catch(() => {}); } catch {} }, 400);
-    } catch {}
-  };
-
-  if (!visible) return null;
-
-  const activeAsset = (state?.asset && state.asset !== 'UNKNOWN') ? state.asset : null;
+  const activeAsset = state?.asset && state.asset !== 'UNKNOWN' ? state.asset : null;
   const hasDecision = state?.decision === 'BUY' || state?.decision === 'SELL' || state?.decision === 'WAIT';
   const analysisUnavailable = state?.systemStatus === 'UNAVAILABLE' || state?.systemStatus === 'DEGRADED' || !hasDecision;
-
   const activeState = useMemo(() => ({
     systemStatus: state?.systemStatus || 'READY',
     analysisState: state?.analysisState || 'RUNNING',
@@ -130,7 +113,7 @@ export default function OverlayApp({ panelType = 'signal' }: OverlayAppProps) {
     confidence: analysisUnavailable ? null : (state?.confidence ?? null),
     risk: analysisUnavailable ? null : (state?.risk || state?.riskLevel || null),
     riskLevel: analysisUnavailable ? null : (state?.riskLevel || state?.risk || null),
-    reason: analysisUnavailable ? (state?.reason || 'Waiting for usable market evidence.') : state.reason,
+    reason: analysisUnavailable ? (state?.reason || 'Waiting for usable market evidence.') : state?.reason,
     reasons: analysisUnavailable ? [state?.reason || 'Waiting for usable market evidence.'] : (state?.reasons || state?.whyTake || []),
     whyWait: analysisUnavailable ? (state?.whyWait || state?.reason || 'Waiting for usable market evidence.') : (state?.whyWait || state?.reason),
     whyTake: activeAsset ? (state?.whyTake || state?.reasons || []) : [],
@@ -140,6 +123,9 @@ export default function OverlayApp({ panelType = 'signal' }: OverlayAppProps) {
     expiry: activeAsset ? (state?.expiry || state?.recommendedExpiry || null) : null,
     lifecycleStage: state?.lifecycleStage || 'CANDIDATE',
     activeTradeContext: state?.activeTradeContext || null,
+    tradeMonitor: state?.tradeMonitor || null,
+    lastTradeResult: state?.lastTradeResult || null,
+    bestSetup: state?.bestSetup || null,
     entryCountdownSec: state?.entryCountdownSec ?? null,
     marketRegime: state?.marketRegime ?? null,
     trend: activeAsset ? (state?.trend || null) : null,
@@ -158,15 +144,19 @@ export default function OverlayApp({ panelType = 'signal' }: OverlayAppProps) {
     marketIntelState: state?.marketIntelState || null,
     signalStatus: state?.signalStatus || 'WAIT',
     tradeStatus: state?.tradeStatus || 'NO TRADE',
+    calibrationActive: state?.calibrationActive || false,
+    winProbability: state?.winProbability ?? null,
+    waitScore: state?.waitScore ?? null,
+    calibrationMode: state?.calibrationMode || null,
     soundEnabled: state?.soundEnabled ?? true,
     soundBuyEnabled: state?.soundBuyEnabled ?? true,
     soundSellEnabled: state?.soundSellEnabled ?? true,
     soundDeteriorationEnabled: state?.soundDeteriorationEnabled ?? true,
   }), [state, activeAsset, analysisUnavailable]);
 
+  if (!visible) return null;
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#0a0e1a' }}>
-      {/* Single combined panel — Signal + Trade Monitor + Market Intel */}
       <SignalPanel state={activeState} />
     </div>
   );
