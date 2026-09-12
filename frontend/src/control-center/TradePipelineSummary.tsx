@@ -75,20 +75,20 @@ export default function TradePipelineSummary() {
             AUTHORITATIVE TRADE LEDGER · {ledger.length} LOADED
           </div>
           <div style={{ overflow: 'auto', maxHeight: '440px' }}>
-          <table className="terminal-table">
-            <thead><tr><th>TIME</th><th>ASSET</th><th>MODE</th><th>ACTION</th><th>STATE</th><th>RESULT</th></tr></thead>
-            <tbody>
-              {ledger.map((trade) => (
-                <tr key={trade.id}>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '10px' }}>{new Date(trade.timestamp).toLocaleTimeString()}</td>
-                  <td style={{ fontWeight: 700 }}>{trade.asset || 'UNRESOLVED ASSET'}</td>
-                  <td>{trade.platformMode || 'UNKNOWN'}</td>
-                  <td style={{ color: trade.stabilizedDecision === 'BUY' ? 'var(--color-emerald)' : 'var(--color-coral)', fontWeight: 800 }}>{trade.stabilizedDecision}</td>
-                  <td>{trade.tradeStatus || (trade.outcome ? 'COMPLETED' : 'ACTIVE')}</td>
-                  <td style={{ fontWeight: 800 }}>{trade.outcome || 'PENDING'}</td>
-                </tr>
-              ))}
-            </tbody>
+            <table className="terminal-table">
+              <thead><tr><th>TIME</th><th>ASSET</th><th>MODE</th><th>ACTION</th><th>STATE</th><th>RESULT</th></tr></thead>
+              <tbody>
+                {ledger.map((trade) => (
+                  <tr key={trade.id}>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '10px' }}>{new Date(trade.timestamp).toLocaleTimeString()}</td>
+                    <td style={{ fontWeight: 700 }}>{trade.asset || 'UNRESOLVED ASSET'}</td>
+                    <td>{trade.platformMode || 'UNKNOWN'}</td>
+                    <td style={{ color: trade.stabilizedDecision === 'BUY' ? 'var(--color-emerald)' : 'var(--color-coral)', fontWeight: 800 }}>{trade.stabilizedDecision}</td>
+                    <td>{trade.tradeStatus || (trade.outcome ? 'COMPLETED' : 'ACTIVE')}</td>
+                    <td style={{ fontWeight: 800 }}>{trade.outcome || 'PENDING'}</td>
+                  </tr>
+                ))}
+              </tbody>
             </table>
           </div>
         </>
