@@ -30,8 +30,7 @@ describe('Sprint T5 Reliability & Terminal UX Refinement Tests', () => {
     }
   });
 
-  it('Issue 1: discards stale OCR price cache older than 5 seconds', () => {
-    // Simulate a real extraction cycle: the page produced an asset + price.
+  it('Issue 1: discards a quote when no valid heartbeat arrives for 5 seconds', () => {
     ocrService.extractAssetFromTitle('EUR/USD — Olymp Trade');
     ocrService.extractPriceFromText('Price: 1.0842');
 
@@ -41,14 +40,13 @@ describe('Sprint T5 Reliability & Terminal UX Refinement Tests', () => {
     expect(fresh!.currentPrice).toBe(1.0842);
     expect(fresh!.asset).toBe('EUR/USD');
 
-    // Age the PRICE beyond the freshness window: the price (a reading) must be
-    // discarded, while the asset (an identifier) stays valid.
-    (ocrService as any).priceCacheTimestamp = Date.now() - 6000;
+    // Age the source-observation timestamp. Repeating the same valid price in
+    // normal operation refreshes this heartbeat, but silence must still expire.
+    (ocrService as any).priceObservedTimestamp = Date.now() - 6000;
     const priceStale = ocrService.getCachedOcrResults();
     expect(priceStale!.currentPrice).toBeNull();
     expect(priceStale!.asset).toBe('EUR/USD');
 
-    // Age the asset too — everything is now stale.
     (ocrService as any).assetCacheTimestamp = Date.now() - 6000;
     const allStale = ocrService.getCachedOcrResults();
     expect(allStale!.currentPrice).toBeNull();
