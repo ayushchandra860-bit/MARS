@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          node scripts/run-rc4-patch-resilient.mjs 2>&1 | tee /tmp/rc4-patch.log
+          node scripts/rc4-trade-pipeline-finish.mjs 2>&1 | tee /tmp/rc4-patch.log
           patch_status=${PIPESTATUS[0]}
           echo "status=${patch_status}" >> "$GITHUB_OUTPUT"
           exit 0
@@ -47,7 +47,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "fix: restore trade journal counting and verified learning"
+            git commit -m "fix: finish trade journal and ML learning repair"
             git push origin HEAD:fix/trade-journal-learning-rc4
           fi
       - name: Report patch error
