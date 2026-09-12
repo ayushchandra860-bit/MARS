@@ -12,7 +12,7 @@ export function buildEmbeddedTradeDetectorScript(): string {
   var pending = Array.isArray(window.__marsPendingExecutions) ? window.__marsPendingExecutions : [];
   window.__marsPendingExecutions = pending;
 
-  function textOf(el) { return el ? String(el.value || el.innerText || el.textContent || '').trim() : ''; }
+  function textOf(el) { return el ? String(el.value || el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim() : ''; }
   function firstText(selectors, root) {
     try {
       var el = (root || document).querySelector(selectors);
@@ -43,7 +43,7 @@ export function buildEmbeddedTradeDetectorScript(): string {
     return 60;
   }
   function detectAsset(root) {
-    var value = firstText('[data-test="asset-select-button"], [data-test="asset-name"], .asset-select__name, .asset-name, [class*="assetName"], [class*="asset-title"]', root);
+    var value = firstText('[data-test="asset-select-button"], [data-test="asset-name"], [data-qa*="asset"], [data-testid*="asset"], [aria-label*="asset" i], .asset-select__name, .asset-name, [class*="assetName"], [class*="asset-title"]', root);
     if (!value && document.title) value = document.title.replace(/^[0-9.,\\s▲▼\\u25B2\\u25BC\\u2191\\u2193$€₹£]+/, '').split('|')[0];
     return cleanAsset(value);
   }
@@ -51,12 +51,12 @@ export function buildEmbeddedTradeDetectorScript(): string {
     return firstText('[data-test="expiration-input"], [data-test="expiry-time"], [data-test*="duration"], [data-test*="expiry"], input[name="expiry"], input[name="duration"], .expiration-select, [class*="deal-duration"], [class*="duration-input"], [class*="duration-value"]', root);
   }
   function detectPrice(root) {
-    var raw = firstText('[data-test="current-price"], [data-test="current-quote"], [data-test*="asset-price"], [class*="current-price"], [class*="currentPrice"]', root);
+    var raw = firstText('[data-test="current-price"], [data-test="current-quote"], [data-test*="asset-price"], [data-qa*="current-price"], [data-testid*="current-price"], [class*="current-price"], [class*="currentPrice"]', root);
     if (!raw && document.title) raw = document.title;
     return parsePositiveNumber(raw);
   }
   function detectPlatformMode() {
-    var mode = firstText('[data-test*="account-mode"], [data-test*="account-type"], [class*="account-mode"], [class*="accountMode"], [class*="account-type"], [class*="accountType"]');
+    var mode = firstText('[data-test*="account-mode"], [data-test*="account-type"], [data-qa*="account"], [data-testid*="account"], [aria-label*="account" i], [title*="account" i], [class*="account-mode"], [class*="accountMode"], [class*="account-type"], [class*="accountType"]');
     var normalized = mode.toUpperCase();
     if (/\\b(DEMO|PRACTICE)\\b/.test(normalized)) return 'DEMO';
     if (/\\b(LIVE|REAL)\\b/.test(normalized)) return 'LIVE';

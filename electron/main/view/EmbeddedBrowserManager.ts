@@ -23,6 +23,7 @@ import {
   parseBrowserTradeClickMessage,
   parseBrowserTradeResultMessage,
 } from './embeddedEventValidation';
+import { deriveCorrelatedCompletionPrice, enrichBrowserTradeClick } from './tradeEvidenceEnrichment';
 
 const MARKET_SNAPSHOT_PREFIX = '[MARS_MARKET_SNAPSHOT]:';
 const ACTIVE_FRAME_RATE = 60;
@@ -199,56 +200,61 @@ export class EmbeddedBrowserManager {
 
       const click = parseBrowserTradeClickMessage(message);
       if (click) {
+        const contextualClick = enrichBrowserTradeClick(click, this.latestMarketSnapshot);
         const manager = RunningTradeManager.getInstance();
         const evidence = TrustedExecutionEvidenceRegistry.getInstance();
         evidence.stage({
-          executionId: click.executionId,
-          eventId: click.eventId,
-          action: click.action,
-          asset: click.asset,
-          entryPrice: click.entryPrice,
-          expirySeconds: click.expirySeconds,
-          platformMode: click.platformMode,
-          capturedAt: click.timestamp,
+          executionId: contextualClick.executionId,
+          eventId: contextualClick.eventId,
+          action: contextualClick.action,
+          asset: contextualClick.asset,
+          entryPrice: contextualClick.entryPrice,
+          expirySeconds: contextualClick.expirySeconds,
+          platformMode: contextualClick.platformMode,
+          capturedAt: contextualClick.timestamp,
         });
 
-        let trade = manager.findTradeByExecutionId(click.executionId);
+        let trade = manager.findTradeByExecutionId(contextualClick.executionId);
         if (!trade) {
-          try { this.tradeClickHandler?.(click); } catch (error) {
+          try { this.tradeClickHandler?.(contextualClick); } catch (error) {
             console.error('[MARS Browser Detector] Trade-click subscriber failed:', error);
           }
-          trade = manager.findTradeByExecutionId(click.executionId);
+          trade = manager.findTradeByExecutionId(contextualClick.executionId);
         }
 
         if (!trade) {
           trade = manager.registerTrade({
             sessionId: 'live-browser',
-            signalId: `browser-${click.executionId}`,
-            executionId: click.executionId,
-            asset: click.asset,
-            direction: click.action,
-            expirySeconds: click.expirySeconds,
-            entryPrice: click.entryPrice === null ? null : String(click.entryPrice),
-            eventId: click.eventId,
-            platformMode: click.platformMode,
+            signalId: 'browser-' + contextualClick.executionId,
+            executionId: contextualClick.executionId,
+            asset: contextualClick.asset,
+            direction: contextualClick.action,
+            expirySeconds: contextualClick.expirySeconds,
+            entryPrice: contextualClick.entryPrice === null ? null : String(contextualClick.entryPrice),
+            eventId: contextualClick.eventId,
+            platformMode: contextualClick.platformMode,
           }) ?? undefined;
         }
-        evidence.discard(click.executionId);
+        evidence.discard(contextualClick.executionId);
         if (trade) this.emitTradeStateRefresh();
         return;
       }
-
       const result = parseBrowserTradeResultMessage(message);
       if (!result) return;
       const outcome = result.outcome === 'WIN'
         ? TradeOutcome.WIN
         : result.outcome === 'LOSS' ? TradeOutcome.LOSS : TradeOutcome.DRAW;
-      const verifiedExitPrice = result.completionPrice === null ? null : String(result.completionPrice);
+      const manager = RunningTradeManager.getInstance();
+      const correlatedTrade = result.executionId
+        ? manager.findTradeByExecutionId(result.executionId)
+        : undefined;
+      const verifiedExitPrice = result.completionPrice !== null
+        ? String(result.completionPrice)
+        : deriveCorrelatedCompletionPrice(correlatedTrade, this.latestMarketSnapshot, result.timestamp);
       const completed = result.executionId
-        ? RunningTradeManager.getInstance().resolveTradeByExecutionId(result.executionId, outcome, verifiedExitPrice)
-        : RunningTradeManager.getInstance().resolveNextActiveTrade(outcome, null);
-      if (completed) this.emitTradeStateRefresh();
-    });
+        ? manager.resolveTradeByExecutionId(result.executionId, outcome, verifiedExitPrice)
+        : manager.resolveNextActiveTrade(outcome, null);
+      if (completed) this.emitTradeStateRefresh();    });
 
     void contents.loadURL(this.currentUrl).catch((error) => {
       console.error('[MARS BROWSER] Initial platform load failed:', error);

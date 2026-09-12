@@ -52,10 +52,7 @@ export class CanonicalDataAccessLayer {
     if (!this.db) return [];
 
     try {
-      const conditions: string[] = [
-        "t.asset IS NOT NULL AND TRIM(t.asset) NOT IN ('', '▲', '▼', 'UNKNOWN')",
-        "(s.id IS NOT NULL OR t.signal_id LIKE 'manual-%' OR t.signal_id LIKE 'trade-%' OR t.signal_id LIKE 'signal-%')"
-      ];
+      const conditions: string[] = [];
       const params: any[] = [];
 
       if (query.sessionId) {
@@ -157,6 +154,7 @@ export class CanonicalDataAccessLayer {
           timestamp: r.entry_timestamp,
           asset: r.asset,
           platformMode: (r.platform_mode as PlatformMode) || null,
+          tradeStatus: r.status || null,
           timeframe: r.timeframe,
           rawDecision: (r.raw_decision as TradingAction) || (r.action as TradingAction),
           stabilizedDecision: (r.stabilized_decision as TradingAction) || (r.action as TradingAction),
@@ -225,6 +223,10 @@ export class CanonicalDataAccessLayer {
         "SELECT COUNT(*) as count FROM tracked_trades WHERE status IN ('ACTIVE', 'EXPIRING')"
       ).get() as { count: number } | undefined;
       const activeTradeCount = activeCountRow?.count ?? 0;
+      const registeredCountRow = this.db.prepare(
+        'SELECT COUNT(*) as count FROM tracked_trades'
+      ).get() as { count: number } | undefined;
+      const registeredTradeCount = registeredCountRow?.count ?? 0;
 
       // Calculate session / queried metrics
       let wins = 0;
@@ -391,6 +393,8 @@ export class CanonicalDataAccessLayer {
         allTimeLosses,
         allTimeWinRate,
         activeTradeCount,
+        registeredTradeCount,
+        unresolvedTradeCount: activeTradeCount,
         recentForm,
         overallWinRate: allTimeWinRate,
         todayWinRate,
@@ -447,6 +451,8 @@ export class CanonicalDataAccessLayer {
       allTimeLosses: 0,
       allTimeWinRate: 0,
       activeTradeCount: 0,
+      registeredTradeCount: 0,
+      unresolvedTradeCount: 0,
       recentForm: [],
       overallWinRate: 0,
       todayWinRate: 0,
