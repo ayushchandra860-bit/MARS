@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   finalize:
@@ -23,40 +24,46 @@ jobs:
       - name: Apply deterministic source updates
         shell: bash
         run: |
+          mkdir -p ci-logs
+          exec > >(tee ci-logs/finalize.log) 2>&1
           node <<'NODE'
           const fs = require('fs');
 
           const controllerPath = 'electron/main/lifecycle/AnalysisController.ts';
           let controller = fs.readFileSync(controllerPath, 'utf8');
-          const loopPattern = /  private startScanLoop\(intervalMs: number\): void \{[\s\S]*?\n  private stopScanLoop\(\): void \{[\s\S]*?\n  \}\n\n  private async runScanCycle/;
-          const newLoop = `  private startScanLoop(intervalMs: number): void {
-            this.stopScanLoop();
-            const scheduleNext = (): void => {
-              if (this.state !== AnalysisState.RUNNING) return;
-              this.scanTimer = setTimeout(async () => {
-                this.scanTimer = null;
-                try {
-                  await this.runScanCycle();
-                } catch (err) {
-                  console.error('[MARS] Unhandled scan cycle error:', err);
-                } finally {
-                  scheduleNext();
-                }
-              }, intervalMs);
-            };
-            scheduleNext();
-          }
-
-          private stopScanLoop(): void {
-            if (this.scanTimer) {
-              clearTimeout(this.scanTimer);
-              this.scanTimer = null;
-            }
-          }
-
-          private async runScanCycle`;
-          if (!loopPattern.test(controller)) throw new Error('Expected AnalysisController scan loop was not found.');
-          controller = controller.replace(loopPattern, newLoop);
+          const startToken = '  private startScanLoop(intervalMs: number): void {';
+          const endToken = '  private async runScanCycle';
+          const start = controller.indexOf(startToken);
+          const end = controller.indexOf(endToken, start);
+          if (start < 0 || end <= start) throw new Error(`Scan-loop bounds missing: start=${start}, end=${end}`);
+          const lines = [
+            '  private startScanLoop(intervalMs: number): void {',
+            '    this.stopScanLoop();',
+            '    const scheduleNext = (): void => {',
+            '      if (this.state !== AnalysisState.RUNNING) return;',
+            '      this.scanTimer = setTimeout(async () => {',
+            '        this.scanTimer = null;',
+            '        try {',
+            '          await this.runScanCycle();',
+            '        } catch (err) {',
+            "          console.error('[MARS] Unhandled scan cycle error:', err);",
+            '        } finally {',
+            '          scheduleNext();',
+            '        }',
+            '      }, intervalMs);',
+            '    };',
+            '    scheduleNext();',
+            '  }',
+            '',
+            '  private stopScanLoop(): void {',
+            '    if (this.scanTimer) {',
+            '      clearTimeout(this.scanTimer);',
+            '      this.scanTimer = null;',
+            '    }',
+            '  }',
+            '',
+          ];
+          controller = controller.slice(0, start) + lines.join('\n') + controller.slice(end);
           fs.writeFileSync(controllerPath, controller);
 
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -83,3 +90,11 @@ jobs:
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'perf: serialize scan cadence and sync rc3 metadata'
           git push origin HEAD:perf/windows-render-rc3
+      - name: Report finalizer failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo '<!-- mars-rc3-finalizer -->'; echo '### RC3 source finalizer failed'; echo '```text'; tail -n 120 ci-logs/finalize.log 2>/dev/null || true; echo '```'; } > finalizer-comment.md
+          gh pr comment 5 --body-file finalizer-comment.md
