@@ -14,7 +14,7 @@ on:
         description: Release tag when publishing
         required: true
         type: string
-        default: v3.0.1-rc.3
+        default: v3.0.1-rc.4
   push:
     branches: [main]
     tags: ['v*']
@@ -194,11 +194,19 @@ jobs:
           if ($files.Count -lt 3) { throw 'Installer, portable app, or checksums are missing.' }
           $paths = $files | ForEach-Object { $_.FullName }
           @"
-          MARS PRO V3 Windows performance and recovery release candidate.
+          MARS PRO V3 Windows trade-journal and verified-learning release candidate.
 
           This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
 
-          Performance and reliability changes in rc.3:
+          Trade journal and learning corrections in rc.4:
+          - counts every captured execution in the authoritative trade ledger
+          - separates registered, active/unresolved, completed, and ML-clean sample totals
+          - fills missing optional click facts only from a fresh allowlisted-page snapshot
+          - correlates an omitted completion quote only to a fresh exact-asset execution
+          - keeps ML training limited to verified LIVE outcomes with valid entry/exit prices and features
+          - keeps DEMO, UNKNOWN, unresolved, stale, mismatched, and ambiguous records out of LIVE learning
+
+          Performance and reliability changes in rc.3 remain included:
           - uses hardware acceleration normally with crash-triggered Safe Graphics Mode
           - uses adaptive 60/30/5 FPS rendering and targeted live quote updates
           - moves chart pixel analysis to a worker and bounds heavy capture work
@@ -206,7 +214,6 @@ jobs:
           - reduces duplicate overlay updates, continuous CSS repaints, and no-op database exports
           - keeps BUY, SELL, and deterioration sounds
           - keeps startup diagnostics and preserves corrupt database files before recovery
-          - passed packaged-EXE visible-window checks with fresh and deliberately corrupted data
 
           MARS is decision-support software, not a profit guarantee. Start in DEMO mode and use strict risk limits.
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
