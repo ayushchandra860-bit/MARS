@@ -16,6 +16,8 @@ export class OverlayManager {
   private latestPayload: any = null;
   private latestSemanticFingerprint = '';
   private latestQuoteAt = 0;
+  private quoteUpdateCount = 0;
+  private ipcUpdateCount = 0;
 
   public createWindows(): void {
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) return;
@@ -128,10 +130,11 @@ export class OverlayManager {
     observedAt: number;
   }): void {
     if (!snapshot || Date.now() - snapshot.observedAt > 5000) return;
-    const nextPrice = typeof snapshot.price === 'number' && Number.isFinite(snapshot.price) && snapshot.price > 0
-      ? String(snapshot.price)
+    const numericPrice = typeof snapshot.price === 'number' && Number.isFinite(snapshot.price) && snapshot.price > 0
+      ? snapshot.price
       : null;
-    const patch: Record<string, unknown> = {
+    const nextPrice = numericPrice !== null ? String(numericPrice) : null;
+    const patch: Record<string, any> = {
       lastUpdate: snapshot.observedAt,
       platformMode: snapshot.platformMode,
     };
@@ -139,9 +142,30 @@ export class OverlayManager {
     if (snapshot.timeframe) patch.timeframe = snapshot.timeframe;
     if (nextPrice !== null) patch.currentPrice = nextPrice;
 
-    const quoteKey = `${patch.asset || this.latestPayload?.asset || ''}|${patch.currentPrice || this.latestPayload?.currentPrice || ''}|${patch.timeframe || ''}|${patch.platformMode || ''}`;
+    const priorMonitor = this.latestPayload?.tradeMonitor;
+    if (numericPrice !== null && priorMonitor) {
+      const entryPrice = Number(priorMonitor.entryPrice);
+      const action = String(priorMonitor.action || '').toUpperCase();
+      const direction = action === 'SELL' ? -1 : 1;
+      const rawMove = Number.isFinite(entryPrice) && entryPrice > 0
+        ? (numericPrice - entryPrice) * direction
+        : null;
+      const pnlPct = rawMove === null ? null : (rawMove / entryPrice) * 100;
+      const health = pnlPct === null ? priorMonitor.health : pnlPct > 0 ? 'IN PROFIT' : pnlPct < 0 ? 'AGAINST' : 'AT ENTRY';
+      patch.tradeMonitor = {
+        ...priorMonitor,
+        currentPrice: numericPrice,
+        pnlPoints: rawMove,
+        pnlPct,
+        health,
+        healthReason: 'Indicative live quote only; final result remains evidence-verified.',
+      };
+    }
+
+    const quoteKey = [patch.asset || this.latestPayload?.asset || '', patch.currentPrice || this.latestPayload?.currentPrice || '', patch.timeframe || '', patch.platformMode || ''].join('|');
     if (quoteKey === this.latestPayload?.__quoteKey && snapshot.observedAt - this.latestQuoteAt < 900) return;
     this.latestQuoteAt = snapshot.observedAt;
+    this.quoteUpdateCount++;
     this.latestPayload = { ...(this.latestPayload || {}), ...patch, __quoteKey: quoteKey };
     this.sendPayload(patch);
   }
@@ -213,7 +237,16 @@ export class OverlayManager {
       window.showInactive();
       window.setAlwaysOnTop(true, 'screen-saver');
     }
+    this.ipcUpdateCount++;
     window.webContents.send(IPC_CHANNELS.OVERLAY_STATE_UPDATE, payload);
+  }
+
+  public getRuntimeMetrics(): { latestQuoteAgeMs: number | null; quoteUpdateCount: number; ipcUpdateCount: number } {
+    return {
+      latestQuoteAgeMs: this.latestQuoteAt > 0 ? Math.max(0, Date.now() - this.latestQuoteAt) : null,
+      quoteUpdateCount: this.quoteUpdateCount,
+      ipcUpdateCount: this.ipcUpdateCount,
+    };
   }
 
   public getIsVisible(): boolean { return this.isVisible; }
