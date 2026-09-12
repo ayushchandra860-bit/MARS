@@ -397,7 +397,7 @@ export class MarketIntelEngine {
     if (!level) return { display: type === 'SUPPORT' ? 'SCANNING SUPPORT' : 'SCANNING RESISTANCE', status: 'UNKNOWN' };
 
     const pts = Math.abs(level.distancePts);
-    if (pts <= 2 || level.interactionState === ('TESTING' as any) || level.interactionState === ('REJECTED' as any)) {
+    if (level.interactionState === ('TESTING' as any) || level.interactionState === ('REJECTED' as any)) {
       if (type === 'SUPPORT') {
         if (action === TradingAction.BUY) return { display: 'HIT • BOUNCE EXPECTED', status: 'HIT' };
         if (action === TradingAction.SELL) return { display: 'HIT • BREAKDOWN RISK', status: 'HIT' };
@@ -413,7 +413,8 @@ export class MarketIntelEngine {
       return { display: 'BROKEN', status: 'BROKEN' };
     }
 
-    return { display: `${pts} PTS ${type === 'SUPPORT' ? 'BELOW' : 'ABOVE'}`, status: 'FAR' };
+    const proximity = pts <= 8 ? 'NEAR' : pts <= 25 ? 'MID' : 'FAR';
+    return { display: `${proximity} • VISUAL ${type === 'SUPPORT' ? 'BELOW' : 'ABOVE'}`, status: 'FAR' };
   }
 
   private deriveReversalRisk(risk: RiskLevel | null, confidence: number | null): string {

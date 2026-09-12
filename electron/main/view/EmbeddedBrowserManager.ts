@@ -254,7 +254,8 @@ export class EmbeddedBrowserManager {
       const completed = result.executionId
         ? manager.resolveTradeByExecutionId(result.executionId, outcome, verifiedExitPrice)
         : manager.resolveNextActiveTrade(outcome, null);
-      if (completed) this.emitTradeStateRefresh();    });
+      if (completed) this.emitTradeStateRefresh();
+    });
 
     void contents.loadURL(this.currentUrl).catch((error) => {
       console.error('[MARS BROWSER] Initial platform load failed:', error);

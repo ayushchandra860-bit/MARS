@@ -101,10 +101,8 @@ describe('PerformanceEngine (Sprint T2)', () => {
     tradeManager.resolveTradeOutcome(b2!.id, TradeOutcome.LOSS);
 
     const stats = performanceEngine.getPerformanceStats(s);
-    expect(stats.bestAsset?.asset).toBe('EUR/USD');
-    expect(stats.bestAsset?.winRate).toBe(100);
-    expect(stats.worstAsset?.asset).toBe('BTC/USD');
-    expect(stats.worstAsset?.winRate).toBe(0);
+    expect(stats.bestAsset).toBeNull();
+    expect(stats.worstAsset).toBeNull();
   });
 
   it('Task T2.7 & T2.8: supports history filtering and deletion management', () => {

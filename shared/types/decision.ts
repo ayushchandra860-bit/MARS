@@ -57,7 +57,7 @@ export enum TradeHealth {
 }
 
 export type SignalStatusState = 'WAIT' | 'BUY SIGNAL ACTIVE' | 'SELL SIGNAL ACTIVE';
-export type TradeStatusState = 'NO TRADE' | 'ENTRY WINDOW' | 'TRADE ACTIVE' | 'TRADE INVALIDATED' | 'TRADE COMPLETED';
+export type TradeStatusState = 'NO TRADE' | 'ENTRY WINDOW' | 'TRADE ACTIVE' | 'RESULT PENDING' | 'TRADE INVALIDATED' | 'TRADE COMPLETED';
 export type SignalStatusLabel = SignalStatusState;
 export type TradeStatusLabel = TradeStatusState;
 export type CalibrationMode = AnalysisMode | 'SAFE' | 'BALANCED' | 'COMPREHENSIVE' | 'SNIPER' | 'AGGRESSIVE';

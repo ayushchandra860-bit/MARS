@@ -218,11 +218,16 @@ export class CanonicalDataAccessLayer {
         ).all() as any[];
       }
 
-      // Active trade count
+      // "Active now" excludes expired rows that are awaiting a verified result.
+      const now = Date.now();
       const activeCountRow = this.db.prepare(
+        "SELECT COUNT(*) as count FROM tracked_trades WHERE status = 'ACTIVE' AND expiry_timestamp > ?"
+      ).get(now) as { count: number } | undefined;
+      const activeTradeCount = activeCountRow?.count ?? 0;
+      const unresolvedCountRow = this.db.prepare(
         "SELECT COUNT(*) as count FROM tracked_trades WHERE status IN ('ACTIVE', 'EXPIRING')"
       ).get() as { count: number } | undefined;
-      const activeTradeCount = activeCountRow?.count ?? 0;
+      const unresolvedTradeCount = unresolvedCountRow?.count ?? 0;
       const registeredCountRow = this.db.prepare(
         'SELECT COUNT(*) as count FROM tracked_trades'
       ).get() as { count: number } | undefined;
@@ -348,8 +353,8 @@ export class CanonicalDataAccessLayer {
           totalTrades: total,
         };
 
-        // Eligible for best/worst ranking: at least 2 trades (or 1 if total completed is small)
-        if (total >= (totalCompleted >= 5 ? 2 : 1)) {
+        // Avoid declaring an asset "best" or "worst" from a tiny sample.
+        if (total >= 5) {
           eligibleAssets.push({ asset, winRate: wr, totalTrades: total });
         }
       }
@@ -379,10 +384,10 @@ export class CanonicalDataAccessLayer {
       const buyCount = signalCountsRow?.buy_count ?? 0;
       const sellCount = signalCountsRow?.sell_count ?? 0;
       const waitCount = signalCountsRow?.wait_count ?? 0;
-      const avgSignalStrength = signalCountsRow?.avg_strength ?? 0.7;
+      const avgSignalStrength = signalCountsRow?.avg_strength ?? 0;
 
       const avgConfidence: CanonicalConfidence = confidenceCount > 0 ? totalConfidenceSum / confidenceCount : null;
-      const avgTradeDurationSec = durationCount > 0 ? Math.round(totalDurationSec / durationCount) : 60;
+      const avgTradeDurationSec = durationCount > 0 ? Math.round(totalDurationSec / durationCount) : 0;
 
       return {
         totalCompleted,
@@ -394,7 +399,7 @@ export class CanonicalDataAccessLayer {
         allTimeWinRate,
         activeTradeCount,
         registeredTradeCount,
-        unresolvedTradeCount: activeTradeCount,
+        unresolvedTradeCount,
         recentForm,
         overallWinRate: allTimeWinRate,
         todayWinRate,

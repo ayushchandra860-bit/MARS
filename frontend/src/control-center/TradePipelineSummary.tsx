@@ -31,7 +31,7 @@ export default function TradePipelineSummary() {
   useIpcListener(IPC_CHANNELS.ACTIVE_TRADES_UPDATE, () => { void refresh(); });
 
   const registered = stats?.registeredTradeCount ?? history.length;
-  const completed = stats?.totalCompleted ?? history.filter((trade) => Boolean(trade.outcome)).length;
+  const completed = stats?.totalCompleted ?? history.filter((trade) => ['WIN', 'LOSS', 'DRAW'].includes(String(trade.outcome))).length;
   const unresolved = stats?.unresolvedTradeCount ?? stats?.activeTradeCount ?? history.filter((trade) => !trade.outcome).length;
   const samples = learning?.sampleSize ?? 0;
   const ledger = history;

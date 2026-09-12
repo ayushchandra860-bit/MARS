@@ -106,7 +106,7 @@ export interface ComprehensiveAnalyticsReport {
   regimeAnalytics: RegimeAnalytics[];
   topReasons: ReasonPerformance[];
   hourlyAnalytics: HourlyAnalytics[];
-  validationReport: RuntimeValidationReport;
+  runtimeValidation: RuntimeValidationReport;
   autoBugReport: AutoBugReport;
 }
 
@@ -297,6 +297,13 @@ export default function AnalyticsView() {
   const maxHourlyTrades = Math.max(1, ...(report.hourlyAnalytics || []).map(h => h.tradeCount));
   const activeHours = (report.hourlyAnalytics || []).filter(h => h.tradeCount > 0);
   const bestHour = activeHours.length > 0 ? activeHours.reduce((a, b) => b.winRate > a.winRate ? b : a) : null;
+  const analyticsWarnings = Boolean(
+    report.autoBugReport?.failingConfidenceBuckets?.length
+    || report.autoBugReport?.failingAssets?.length
+    || report.autoBugReport?.failingRegimes?.length
+    || report.autoBugReport?.worstReasons?.length
+  );
+  const analyticsReady = report.totalTrades >= 5;
 
   return (
     <div>
@@ -313,7 +320,7 @@ export default function AnalyticsView() {
 
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
           <div style={{ textAlign: 'right', marginRight: '8px' }}>
-            <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700 }}>TOTAL TRADES</div>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700 }}>VERIFIED LIVE OUTCOMES</div>
             <div style={{ fontSize: '20px', fontWeight: 900, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>
               {report.totalTrades}
             </div>
@@ -329,33 +336,33 @@ export default function AnalyticsView() {
 
       {/* Top Banner: Runtime Validation & Auto Bug Detection */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
-        <GlassPanel auroraBorder style={{ borderLeft: report.validationReport?.isValid ? '4px solid var(--color-emerald)' : '4px solid var(--color-coral)' }}>
+        <GlassPanel auroraBorder style={{ borderLeft: report.runtimeValidation?.isValid ? '4px solid var(--color-emerald)' : '4px solid var(--color-coral)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>RUNTIME DATA INTEGRITY</span>
             <span style={{
               fontWeight: 800, fontSize: '11px',
-              color: report.validationReport?.isValid ? 'var(--color-emerald)' : 'var(--color-coral)',
+              color: report.runtimeValidation?.isValid ? 'var(--color-emerald)' : 'var(--color-coral)',
             }}>
-              {report.validationReport?.isValid ? '100% VALID' : `${report.validationReport?.corruptRecordsCount || 0} CORRUPT RECORDS`}
+              {report.runtimeValidation?.isValid ? 'STRUCTURE VALID' : `${report.runtimeValidation?.corruptRecordsCount || 0} CORRUPT RECORDS`}
             </span>
           </div>
           <div style={{ fontSize: '18px', fontWeight: 900, marginTop: '6px', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
-            {report.validationReport?.totalRecordsChecked || 0} Records Verified
+            {report.runtimeValidation?.totalRecordsChecked || 0} Ledger Rows Checked
           </div>
         </GlassPanel>
 
-        <GlassPanel style={{ borderLeft: (!report.autoBugReport?.failingConfidenceBuckets || report.autoBugReport.failingConfidenceBuckets.length === 0) ? '4px solid var(--color-emerald)' : '4px solid var(--color-amber)' }}>
+        <GlassPanel style={{ borderLeft: !analyticsReady ? '4px solid var(--color-amber)' : analyticsWarnings ? '4px solid var(--color-coral)' : '4px solid var(--color-emerald)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>AUTO BUG DETECTOR</span>
             <span style={{
               fontWeight: 800, fontSize: '11px',
-              color: (!report.autoBugReport?.failingConfidenceBuckets || report.autoBugReport.failingConfidenceBuckets.length === 0) ? 'var(--color-emerald)' : 'var(--color-amber)',
+              color: !analyticsReady ? 'var(--color-amber)' : analyticsWarnings ? 'var(--color-coral)' : 'var(--color-emerald)',
             }}>
-              {(!report.autoBugReport?.failingConfidenceBuckets || report.autoBugReport.failingConfidenceBuckets.length === 0) ? 'HEALTHY' : 'ATTENTION REQUIRED'}
+              {!analyticsReady ? 'INSUFFICIENT VERIFIED DATA' : analyticsWarnings ? 'ATTENTION REQUIRED' : 'HEALTHY'}
             </span>
           </div>
           <div style={{ fontSize: '13px', fontWeight: 700, marginTop: '6px', color: 'var(--text-secondary)' }}>
-            {report.autoBugReport?.summary || 'All active segments operating within expected parameters.'}
+            {!analyticsReady ? 'Need at least 5 verified LIVE outcomes before health claims.' : report.autoBugReport?.summary || 'All measured segments are within configured thresholds.'}
           </div>
         </GlassPanel>
       </div>

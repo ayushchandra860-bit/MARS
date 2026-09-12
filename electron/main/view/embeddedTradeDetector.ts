@@ -51,9 +51,18 @@ export function buildEmbeddedTradeDetectorScript(): string {
     return firstText('[data-test="expiration-input"], [data-test="expiry-time"], [data-test*="duration"], [data-test*="expiry"], input[name="expiry"], input[name="duration"], .expiration-select, [class*="deal-duration"], [class*="duration-input"], [class*="duration-value"]', root);
   }
   function detectPrice(root) {
-    var raw = firstText('[data-test="current-price"], [data-test="current-quote"], [data-test*="asset-price"], [data-qa*="current-price"], [data-testid*="current-price"], [class*="current-price"], [class*="currentPrice"]', root);
-    if (!raw && document.title) raw = document.title;
-    return parsePositiveNumber(raw);
+    var selectors = '[data-test="current-price"], [data-test="current-quote"], [data-test*="asset-price"], [data-qa*="current-price"], [data-testid*="current-price"], [class*="current-price"], [class*="currentPrice"]';
+    try {
+      var elements = (root || document).querySelectorAll(selectors);
+      for (var i = 0; i < elements.length; i++) {
+        var rect = elements[i].getBoundingClientRect ? elements[i].getBoundingClientRect() : null;
+        var visible = !rect || (rect.width > 0 && rect.height > 0);
+        if (!visible) continue;
+        var value = parsePositiveNumber(textOf(elements[i]));
+        if (value !== null) return value;
+      }
+    } catch (_) {}
+    return document.title ? parsePositiveNumber(document.title) : null;
   }
   function detectPlatformMode() {
     var mode = firstText('[data-test*="account-mode"], [data-test*="account-type"], [data-qa*="account"], [data-testid*="account"], [aria-label*="account" i], [title*="account" i], [class*="account-mode"], [class*="accountMode"], [class*="account-type"], [class*="accountType"]');
@@ -156,9 +165,15 @@ export function buildEmbeddedTradeDetectorScript(): string {
     var candidates = pending.filter(function (item) { return !item.resolved && now - item.timestamp >= 0 && now - item.timestamp < 86400000; });
     if (asset) candidates = candidates.filter(function (item) { return normalizeAsset(item.asset) === normalizeAsset(asset); });
     if (direction) candidates = candidates.filter(function (item) { return item.action === direction; });
-    if (candidates.length !== 1) return null;
-    candidates[0].resolved = true;
-    return candidates[0].executionId;
+    candidates = candidates.map(function (item) {
+      var dueAt = item.timestamp + Math.max(1, Number(item.expirySeconds) || 60) * 1000;
+      return { item: item, dueDelta: Math.abs(now - dueAt) };
+    }).filter(function (entry) { return entry.dueDelta <= 20000; })
+      .sort(function (a, b) { return a.dueDelta - b.dueDelta; });
+    if (candidates.length === 0) return null;
+    if (candidates.length > 1 && candidates[1].dueDelta - candidates[0].dueDelta < 2000) return null;
+    candidates[0].item.resolved = true;
+    return candidates[0].item.executionId;
   }
   function emitResult(root, text, match) {
     var now = Date.now();

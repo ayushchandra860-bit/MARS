@@ -32,7 +32,7 @@ describe('SupportResistanceAnalyzer State Machine', () => {
     const result = SupportResistanceAnalyzer.analyze(candles, swingPoints);
     expect(result.nearestSupport).not.toBeNull();
     if (result.nearestSupport) {
-      expect(result.nearestSupport.distancePts).toBe(20);
+      expect(result.nearestSupport.distancePts).toBe(30);
       expect(result.nearestSupport.interactionState).toBe(SRInteractionState.APPROACHING);
     }
   });

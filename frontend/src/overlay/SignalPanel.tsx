@@ -130,7 +130,7 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
   }
 
   const rawStrength = state?.signalStrength ?? anyState.signalStrength;
-  const strengthPercent = typeof rawStrength === 'number' ? Math.round(rawStrength * 100) : null;
+  const strengthPercent = normalizePercent(rawStrength);
 
   const whyWaitText = anyState.whyWait || anyState.reason || state?.reasons?.[0] || 'Analyzing market structure & indicator confluence...';
   const whyTakeReasons: string[] = anyState.whyTake || state?.reasons || [];
@@ -167,14 +167,17 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
     displayConfidence = `${waitScore}%`;
   }
   const tradeStatus = state?.tradeStatus || 'NO TRADE';
-  const hasRunningTrade = !!activeTrade && (tradeStatus === 'TRADE ACTIVE' || typeof activeTrade.remainingSeconds === 'number');
+  const hasRunningTrade = !!activeTrade && typeof activeTrade.remainingSeconds === 'number' && activeTrade.remainingSeconds > 0;
   const tradeDirectionLabel = hasRunningTrade
-    ? activeTrade.status === 'AGAINST_THESIS' ? 'TRADE NEGATIVE'
-      : activeTrade.status === 'DETERIORATING' ? 'TRADE WEAKENING' : 'TRADE POSITIVE'
+    ? tradeMonitor?.health === 'IN PROFIT' ? 'CURRENTLY IN PROFIT'
+      : tradeMonitor?.health === 'AGAINST' ? 'CURRENTLY AGAINST'
+      : activeTrade.status === 'AGAINST_THESIS' ? 'SETUP CONFLICT'
+      : activeTrade.status === 'DETERIORATING' ? 'SETUP WEAKENING'
+      : 'TRADE ACTIVE'
     : tradeStatus;
   // All trades (manual or signal) are treated identically â€” no MANUAL label.
   const primaryStatusLabel = hasRunningTrade ? tradeDirectionLabel : signalStatus;
-  const primaryStatusColor = primaryStatusLabel.includes('NEGATIVE') || primaryStatusLabel.includes('INVALIDATED')
+  const primaryStatusColor = primaryStatusLabel.includes('AGAINST') || primaryStatusLabel.includes('CONFLICT') || primaryStatusLabel.includes('INVALIDATED')
     ? 'var(--color-coral)'
     : primaryStatusLabel.includes('WEAKENING') || primaryStatusLabel.includes('WAIT')
     ? 'var(--color-amber)'
@@ -218,29 +221,29 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
   // decision point for entry/exit timing.
   const supportDist = intel?.support?.distancePts ?? state?.supportLevel?.distancePts ?? null;
   const resistanceDist = intel?.resistance?.distancePts ?? state?.resistanceLevel?.distancePts ?? null;
-  const PROXIMITY_THRESHOLD = 20; // pips â€” alert when within this range
+  const VISUAL_PROXIMITY_THRESHOLD_PX = 8;
   let proximityAlert = '';
   let proximityColor = 'var(--text-muted)';
   if (supportDist !== null && resistanceDist !== null) {
-    const nearSupport = Math.abs(supportDist) <= PROXIMITY_THRESHOLD;
-    const nearResistance = Math.abs(resistanceDist) <= PROXIMITY_THRESHOLD;
+    const nearSupport = Math.abs(supportDist) <= VISUAL_PROXIMITY_THRESHOLD_PX;
+    const nearResistance = Math.abs(resistanceDist) <= VISUAL_PROXIMITY_THRESHOLD_PX;
     if (nearSupport && nearResistance) {
-      proximityAlert = `SQUEEZE ${Math.abs(supportDist)}pts S / ${Math.abs(resistanceDist)}pts R`;
+      proximityAlert = 'VISUAL SQUEEZE';
       proximityColor = 'var(--color-amber)';
     } else if (nearSupport) {
-      proximityAlert = `SUPPORT ${Math.abs(supportDist)}pts BELOW`;
+      proximityAlert = 'NEAR VISUAL SUPPORT';
       proximityColor = 'var(--color-emerald)';
     } else if (nearResistance) {
-      proximityAlert = `RESISTANCE ${Math.abs(resistanceDist)}pts ABOVE`;
+      proximityAlert = 'NEAR VISUAL RESISTANCE';
       proximityColor = 'var(--color-coral)';
     } else {
-      proximityAlert = `CLEAR ZONE ${Math.abs(supportDist)}pts S / ${Math.abs(resistanceDist)}pts R`;
+      proximityAlert = 'CLEAR VISUAL ZONE';
       proximityColor = 'var(--accent-cyan)';
     }
   }
-  const supportDisplay = intel?.support?.display || (state?.supportLevel ? `${state.supportLevel.distancePts} PTS BELOW` : '--');
+  const supportDisplay = intel?.support?.display || (state?.supportLevel ? 'VISUAL LEVEL DETECTED' : '--');
   const supportStatus = intel?.support?.status || 'UNKNOWN';
-  const resistanceDisplay = intel?.resistance?.display || (state?.resistanceLevel ? `${state.resistanceLevel.distancePts} PTS ABOVE` : '--');
+  const resistanceDisplay = intel?.resistance?.display || (state?.resistanceLevel ? 'VISUAL LEVEL DETECTED' : '--');
   const resistanceStatus = intel?.resistance?.status || 'UNKNOWN';
   const sHitColor = (st: string) => st === 'HIT' ? 'var(--color-amber)' : st === 'BROKEN' ? 'var(--color-coral)' : 'var(--text-muted)';
 
@@ -268,7 +271,7 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
             color: tradeStatus === 'TRADE ACTIVE' ? 'var(--color-emerald)' : tradeStatus === 'ENTRY WINDOW' ? 'var(--accent-cyan)' : tradeStatus === 'TRADE INVALIDATED' ? 'var(--color-coral)' : 'var(--text-muted)',
             background: 'rgba(255,255,255,0.05)', letterSpacing: '0.5px',
           }}>
-            {tradeStatus}
+            {tradeStatus === 'TRADE INVALIDATED' ? 'ENTRY INVALIDATED' : tradeStatus}
           </span>
         </div>
       </div>
@@ -462,11 +465,11 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
 
           <div className="analysis-grid" style={{ marginTop: '8px' }}>
             <div className="analysis-cell" style={{ background: 'rgba(16,185,129,0.06)', borderColor: 'rgba(16,185,129,0.2)' }}>
-              <div className="detail-label" style={{ fontSize: '8px', color: 'var(--color-emerald)' }}>SUPPORT {supportStatus === 'HIT' ? '\u2022 HIT' : supportStatus === 'BROKEN' ? '\u2022 BROKEN' : ''}</div>
+              <div className="detail-label" style={{ fontSize: '8px', color: 'var(--color-emerald)' }}>VISUAL SUPPORT {supportStatus === 'HIT' ? '\u2022 HIT' : supportStatus === 'BROKEN' ? '\u2022 BROKEN' : ''}</div>
               <div style={{ fontSize: '10px', fontWeight: 800, color: sHitColor(supportStatus), fontFamily: 'var(--font-mono)' }}>{supportDisplay}</div>
             </div>
             <div className="analysis-cell" style={{ background: 'rgba(244,63,94,0.06)', borderColor: 'rgba(244,63,94,0.2)' }}>
-              <div className="detail-label" style={{ fontSize: '8px', color: 'var(--color-coral)' }}>RESISTANCE {resistanceStatus === 'HIT' ? '\u2022 HIT' : resistanceStatus === 'BROKEN' ? '\u2022 BROKEN' : ''}</div>
+              <div className="detail-label" style={{ fontSize: '8px', color: 'var(--color-coral)' }}>VISUAL RESISTANCE {resistanceStatus === 'HIT' ? '\u2022 HIT' : resistanceStatus === 'BROKEN' ? '\u2022 BROKEN' : ''}</div>
               <div style={{ fontSize: '10px', fontWeight: 800, color: sHitColor(resistanceStatus), fontFamily: 'var(--font-mono)' }}>{resistanceDisplay}</div>
             </div>
           </div>

@@ -67,7 +67,7 @@ export default function PerformanceView() {
 
   const overallWinRate = stats.overallWinRate ?? stats.allTimeWinRate ?? 0;
   const totalCompleted = stats.totalCompleted ?? (stats.allTimeWins + stats.allTimeLosses + (stats.drawCount ?? 0));
-  const avgConfNum = formatConfidenceNumeric(stats.avgConfidence) ?? 50;
+  const avgConfNum = formatConfidenceNumeric(stats.avgConfidence);
 
   const winRateColor = (rate: number) =>
     rate >= 60 ? 'var(--color-emerald)' : rate >= 50 ? 'var(--color-amber)' : 'var(--color-coral)';
@@ -92,7 +92,7 @@ export default function PerformanceView() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '20px' }}>
           <div>
             <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '1px', marginBottom: '6px' }}>
-              ALL-TIME WIN RATE
+              RECORDED OUTCOME WIN RATE
             </div>
             <div style={{
               fontSize: '56px', fontWeight: 900, fontFamily: 'var(--font-mono)',
@@ -146,14 +146,14 @@ export default function PerformanceView() {
         <GlassPanel>
           <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>AVG TRADE DURATION</div>
           <div style={{ fontSize: '22px', fontWeight: 900, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', marginTop: '4px' }}>
-            {stats.avgTradeDurationSec || 60}s
+            {stats.avgTradeDurationSec ?? 0}s
           </div>
         </GlassPanel>
 
         <GlassPanel>
           <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>AVG CONFIDENCE</div>
-          <div style={{ fontSize: '22px', fontWeight: 900, color: winRateColor(avgConfNum), fontFamily: 'var(--font-mono)', marginTop: '4px' }}>
-            {avgConfNum}%
+          <div style={{ fontSize: '22px', fontWeight: 900, color: avgConfNum === null ? 'var(--text-muted)' : winRateColor(avgConfNum), fontFamily: 'var(--font-mono)', marginTop: '4px' }}>
+            {avgConfNum === null ? '—' : `${avgConfNum}%`}
           </div>
         </GlassPanel>
       </div>
@@ -202,7 +202,7 @@ export default function PerformanceView() {
         <GlassPanel>
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '8px' }}>
-              ACTIVE TRADES
+              ACTIVE NOW
             </div>
             <div style={{
               fontSize: '36px',
@@ -212,7 +212,9 @@ export default function PerformanceView() {
             }}>
               {stats.activeTradeCount}
             </div>
-            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>in progress</div>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              {Math.max(0, (stats.unresolvedTradeCount ?? stats.activeTradeCount) - stats.activeTradeCount)} awaiting verified result
+            </div>
           </div>
         </GlassPanel>
 
