@@ -4,11 +4,11 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, fix/trade-journal-learning-rc4]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -16,6 +16,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rc4-source-patch:
+    name: Apply RC4 trade pipeline patch
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/trade-journal-learning-rc4' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply source patch
+        run: node scripts/rc4-trade-pipeline-fix.mjs
+      - name: Commit source changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add electron frontend shared tests package.json package-lock.json .github/workflows/windows-installer.yml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "fix: restore trade journal counting and verified learning"
+          git push origin HEAD:fix/trade-journal-learning-rc4
+
   ipc-contract:
     name: IPC contract audit
     runs-on: ubuntu-latest
