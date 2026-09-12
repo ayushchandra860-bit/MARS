@@ -16,16 +16,12 @@ import { SettingsRepository } from './database/repositories/SettingsRepository';
 import { EmbeddedBrowserManager } from './view/EmbeddedBrowserManager';
 import { RunningTradeManager } from './trade/RunningTradeManager';
 import { TradeRepository } from './database/repositories/TradeRepository';
+import { GraphicsStartupGuard, SAFE_GRAPHICS_ARG } from './performance/GraphicsStartupGuard';
 import {
   isTrustedDevServerUrl,
   isTrustedRendererNavigation,
   OLYMP_TRADE_PLATFORM_URL,
 } from './security/urlPolicy';
-
-// A number of Windows systems silently terminate or never paint Electron after
-// a GPU-process crash. Reliability is more important than accelerated chrome
-// for this decision-support client, so Windows uses the software compositor.
-if (process.platform === 'win32') app.disableHardwareAcceleration();
 
 function describeError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}${error.stack ? `\n${error.stack}` : ''}`;
@@ -46,6 +42,35 @@ function appendStartupLog(event: string, detail?: unknown): string {
   } catch {}
   return filePath;
 }
+
+// Hardware acceleration is the normal Windows path. If the GPU process
+// actually fails, the guard records it and relaunches once in safe graphics
+// mode. This preserves rc.2 startup recovery without forcing every machine to
+// render the live chart and transparent overlay in software.
+let graphicsGuard: GraphicsStartupGuard | null = null;
+let safeGraphicsMode = false;
+let graphicsRelaunching = false;
+if (process.platform === 'win32') {
+  const graphicsStatePath = path.join(app.getPath('userData'), 'mars-graphics-startup.json');
+  graphicsGuard = new GraphicsStartupGuard(graphicsStatePath);
+  safeGraphicsMode = graphicsGuard.beginAttempt(process.argv);
+  if (safeGraphicsMode) app.disableHardwareAcceleration();
+}
+
+app.on('child-process-gone', (_event, details) => {
+  const processType = String(details.type || '').toLowerCase();
+  const reason = String(details.reason || 'unknown');
+  if (process.platform !== 'win32' || safeGraphicsMode || graphicsRelaunching || !processType.includes('gpu')) return;
+  if (!['crashed', 'oom', 'launch-failed', 'integrity-failure'].includes(reason)) return;
+
+  graphicsRelaunching = true;
+  const detail = `${details.type}: ${reason} (exit ${details.exitCode})`;
+  graphicsGuard?.recordGpuFailure(detail);
+  appendStartupLog('GPU process failed; relaunching in Safe Graphics Mode', detail);
+  const args = process.argv.slice(1).filter((arg) => arg !== SAFE_GRAPHICS_ARG);
+  app.relaunch({ args: [...args, SAFE_GRAPHICS_ARG] });
+  app.exit(0);
+});
 
 function showFatalProcessError(title: string, error: unknown): void {
   const logPath = appendStartupLog(title, error);
@@ -94,7 +119,6 @@ if (!gotTheLock) {
       title: 'MARS PRO V3 Workstation',
       frame: false,
       backgroundColor: '#0a0e17',
-      // Never leave the user with a running but completely hidden process.
       show: true,
       webPreferences: {
         preload: path.join(__dirname, '../preload/index.js'),
@@ -127,7 +151,10 @@ if (!gotTheLock) {
         win.maximize();
       }
     });
-    win.webContents.once('did-finish-load', () => appendStartupLog('Main renderer loaded'));
+    win.webContents.once('did-finish-load', () => {
+      graphicsGuard?.recordHealthy(safeGraphicsMode);
+      appendStartupLog(`Main renderer loaded (graphics=${safeGraphicsMode ? 'safe-software' : 'hardware-accelerated'})`);
+    });
 
     const load = devServerUrl
       ? win.loadURL(devServerUrl)
@@ -190,7 +217,7 @@ if (!gotTheLock) {
   async function initializeApp(): Promise<void> {
     try {
       isShuttingDown = false;
-      appendStartupLog(`Starting MARS ${app.getVersion()} (packaged=${app.isPackaged})`);
+      appendStartupLog(`Starting MARS ${app.getVersion()} (packaged=${app.isPackaged}, graphics=${safeGraphicsMode ? 'safe-software' : 'hardware-accelerated'})`);
       const dbPath = path.join(app.getPath('userData'), 'mars-pro.db');
       const recovery = await initializeDatabaseWithRecovery(
         dbPath,
@@ -208,6 +235,9 @@ if (!gotTheLock) {
 
       overlayManager = new OverlayManager();
       overlayManager.createWindows();
+      EmbeddedBrowserManager.getInstance().setMarketSnapshotHandler((snapshot) => {
+        overlayManager?.sendQuote(snapshot);
+      });
       analysisController = new AnalysisController(overlayManager, mainWindow, database);
 
       const tradeRepo = new TradeRepository(database);

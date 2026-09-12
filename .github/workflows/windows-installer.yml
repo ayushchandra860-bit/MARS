@@ -14,7 +14,7 @@ on:
         description: Release tag when publishing
         required: true
         type: string
-        default: v3.0.1-rc.2
+        default: v3.0.1-rc.3
   push:
     branches: [main]
     tags: ['v*']
@@ -194,15 +194,18 @@ jobs:
           if ($files.Count -lt 3) { throw 'Installer, portable app, or checksums are missing.' }
           $paths = $files | ForEach-Object { $_.FullName }
           @"
-          MARS PRO V3 Windows startup recovery release candidate.
+          MARS PRO V3 Windows performance and recovery release candidate.
 
           This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
 
-          Startup changes in rc.2:
-          - keeps startup diagnostics in the app data folder
-          - displays startup and renderer failures instead of exiting silently
-          - preserves unreadable primary and backup databases before clean recovery
-          - uses safer Windows rendering startup settings
+          Performance and reliability changes in rc.3:
+          - uses hardware acceleration normally with crash-triggered Safe Graphics Mode
+          - uses adaptive 60/30/5 FPS rendering and targeted live quote updates
+          - moves chart pixel analysis to a worker and bounds heavy capture work
+          - serializes scans so slow cycles cannot overlap
+          - reduces duplicate overlay updates, continuous CSS repaints, and no-op database exports
+          - keeps BUY, SELL, and deterioration sounds
+          - keeps startup diagnostics and preserves corrupt database files before recovery
           - passed packaged-EXE visible-window checks with fresh and deliberately corrupted data
 
           MARS is decision-support software, not a profit guarantee. Start in DEMO mode and use strict risk limits.

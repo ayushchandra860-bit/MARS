@@ -109,10 +109,17 @@ export class AnalysisController {
   private smoothedConfidence: number | null = null;
   private lastObservedRegime: any = null;
   private lastObservedTrend: any = null;
+  private database: Database | null = null;
+  private lastScanDurationMs = 0;
+  private maxScanDurationMs = 0;
+  private completedScanCount = 0;
+  private skippedScanCount = 0;
+  private lastEventLoopLagMs = 0;
   private lastTradeStatusState: TradeStatusState = 'NO TRADE';
   private latestTradeExplanation: TradeExplanation | null = null;
 
   constructor(overlayManager: OverlayManager, mainWindow: BrowserWindow | null = null, database?: Database) {
+    this.database = database || null;
     this.scanner = new LiveScanner();
     this.qualityGate = new DataQualityGate();
     this.featureExtractor = new FeatureExtractor();
@@ -241,27 +248,40 @@ export class AnalysisController {
   // ----------------------------------------------------------
 
   private startScanLoop(intervalMs: number): void {
-    if (this.scanTimer) {
-      clearInterval(this.scanTimer);
-    }
-    this.scanTimer = setInterval(() => {
-      this.runScanCycle().catch((err) => {
-        console.error('[MARS] Unhandled scan cycle error:', err);
-      });
-    }, intervalMs);
+    this.stopScanLoop();
+    const scheduleNext = (): void => {
+      if (this.state !== AnalysisState.RUNNING) return;
+      const scheduledAt = Date.now();
+      this.scanTimer = setTimeout(async () => {
+        this.scanTimer = null;
+        this.lastEventLoopLagMs = Math.max(0, Date.now() - scheduledAt - intervalMs);
+        try {
+          await this.runScanCycle();
+        } catch (err) {
+          console.error('[MARS] Unhandled scan cycle error:', err);
+        } finally {
+          scheduleNext();
+        }
+      }, intervalMs);
+    };
+    scheduleNext();
   }
 
   private stopScanLoop(): void {
     if (this.scanTimer) {
-      clearInterval(this.scanTimer);
+      clearTimeout(this.scanTimer);
       this.scanTimer = null;
     }
   }
-
   private async runScanCycle(): Promise<void> {
-    if (this.isScanningActive || this.state !== AnalysisState.RUNNING) return;
+    if (this.state !== AnalysisState.RUNNING) return;
+    if (this.isScanningActive) {
+      this.skippedScanCount++;
+      return;
+    }
     this.isScanningActive = true;
     this.framesProcessed++;
+    const scanStartedAt = Date.now();
 
     try {
       const scanResult = await this.scanner.scan();
@@ -351,6 +371,9 @@ export class AnalysisController {
       console.error('[MARS] Scan cycle error:', err);
       this.emitPipelineStatus(SystemStatus.DEGRADED, `Live analysis error: ${message}`);
     } finally {
+      this.lastScanDurationMs = Date.now() - scanStartedAt;
+      this.maxScanDurationMs = Math.max(this.maxScanDurationMs, this.lastScanDurationMs);
+      this.completedScanCount++;
       this.isScanningActive = false;
     }
   }
@@ -1154,11 +1177,30 @@ export class AnalysisController {
   }
 
   public getDeveloperDiagnostics(): DeveloperDiagnostics {
+    const stages = Array.isArray(this.latestDiagnosticsReport?.stages) ? this.latestDiagnosticsReport.stages : [];
+    const stageDuration = (stage: ScannerStage): number | null => {
+      const trace = stages.find((item: any) => item?.stage === stage);
+      return typeof trace?.durationMs === 'number' ? trace.durationMs : null;
+    };
+    const overlayMetrics = this.overlayManager.getRuntimeMetrics();
     return {
       latestReport: this.latestDiagnosticsReport,
       scanCadenceMs: this.currentSettings.scanIntervalMs || 900,
       framesProcessed: this.framesProcessed,
       pipelineErrorCount: this.pipelineErrorCount,
+      runtimePerformance: {
+        completedScans: this.completedScanCount,
+        skippedScans: this.skippedScanCount,
+        lastScanDurationMs: this.lastScanDurationMs,
+        maxScanDurationMs: this.maxScanDurationMs,
+        captureDurationMs: stageDuration(ScannerStage.CAPTURE),
+        workerAnalysisDurationMs: stageDuration(ScannerStage.CANDLES),
+        quoteHeartbeatAgeMs: overlayMetrics.latestQuoteAgeMs,
+        eventLoopLagMs: this.lastEventLoopLagMs,
+        overlayIpcUpdates: overlayMetrics.ipcUpdateCount,
+        quoteIpcUpdates: overlayMetrics.quoteUpdateCount,
+        databasePersistence: this.database?.getPersistenceMetrics() || null,
+      },
     };
   }
 

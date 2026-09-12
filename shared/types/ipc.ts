@@ -297,6 +297,24 @@ export interface DeveloperDiagnostics {
   scanCadenceMs: number;
   framesProcessed: number;
   pipelineErrorCount: number;
+  runtimePerformance?: {
+    completedScans: number;
+    skippedScans: number;
+    lastScanDurationMs: number;
+    maxScanDurationMs: number;
+    captureDurationMs: number | null;
+    workerAnalysisDurationMs: number | null;
+    quoteHeartbeatAgeMs: number | null;
+    eventLoopLagMs: number;
+    overlayIpcUpdates: number;
+    quoteIpcUpdates: number;
+    databasePersistence: {
+      completedSaves: number;
+      skippedNoopTransactions: number;
+      lastSaveDurationMs: number;
+      dirty: boolean;
+    } | null;
+  };
 }
 
 // ----------------------------------------------------------

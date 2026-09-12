@@ -1,12 +1,13 @@
 // ============================================================
 // MARS PRO V3 — Live Scanner Pipeline
-// Orchestrates Capture -> ROI -> Candle -> OCR -> Observation.
+// Lightweight quote observations are separated from worker-based chart scans.
 // ============================================================
 
 import { ScreenCaptureService } from './ScreenCaptureService';
 import { ChartLocator } from './ChartLocator';
 import { CandleDetector } from './CandleDetector';
 import { OcrService } from './OcrService';
+import { PixelAnalysisResult, PixelAnalysisWorker } from './PixelAnalysisWorker';
 import { DiagnosticsTracker } from './ScannerDiagnostics';
 import {
   SessionId,
@@ -18,7 +19,6 @@ import {
 import { ScannerStage, StageStatus } from '../../../shared/types/diagnostics';
 import { MarketObservation } from '../../../shared/types/observation';
 import {
-  AssetIdentity,
   PlatformMode,
   DataFreshness,
   DataSource,
@@ -37,188 +37,126 @@ export class LiveScanner {
   private chartLocator = new ChartLocator();
   private candleDetector = new CandleDetector();
   private ocrService = new OcrService();
+  private pixelWorker = new PixelAnalysisWorker();
 
   private cachedChartRegion: ChartRegion | null = null;
-  private cachedChartRegionTimestamp: number = 0;
-  private scanCount: number = 0;
+  private cachedChartRegionTimestamp = 0;
+  private scanCount = 0;
+  private consecutiveQuoteMisses = 0;
   private static readonly MIN_SIGNAL_CANDLES = 8;
+  private static readonly HEAVY_SCAN_INTERVAL_MS = 3000;
+  private static readonly CANDLE_CACHE_MAX_AGE_MS = 12000;
+  private static readonly REGION_CACHE_MAX_AGE_MS = 10000;
 
-  // Candle cache for the DOM-fast path
-  private candleCache: { candles: any[]; candleQuality: QualityLevel; region: ChartRegion; cropRatio: number; capturedAt: number } | null = null;
-  private static readonly CANDLE_CACHE_MAX_AGE_MS = 5000;
+  private candleCache: {
+    candles: any[];
+    candleQuality: QualityLevel;
+    region: ChartRegion;
+    cropRatio: number;
+    capturedAt: number;
+  } | null = null;
   private backgroundCapturePending = false;
 
-  async scanOnce(
-    sessionId: SessionId,
-    overlayBounds?: ScreenRect
-  ): Promise<ScanResult> {
+  async scanOnce(sessionId: SessionId, _overlayBounds?: ScreenRect): Promise<ScanResult> {
     const diagnosticsTracker = new DiagnosticsTracker();
-    const pipelineStart = Date.now();
     this.scanCount++;
 
     try {
-      // --- Step 0: DOM-first (cheapest possible path) ---------------------
-      const sourceTitle = this.captureService.getActiveSourceName() || '';
-      const titleAsset = this.ocrService.cleanAssetText(sourceTitle);
-      const titlePrice = this.ocrService.extractPriceFromTitle(sourceTitle);
+      const snapshot = this.captureService.getActiveMarketSnapshot(3500);
+      const sourceTitle = snapshot?.title || this.captureService.getActiveSourceName() || '';
+      const snapshotAsset = snapshot?.asset ? this.ocrService.cleanAssetText(snapshot.asset) : null;
+      const titleAsset = snapshotAsset || this.ocrService.cleanAssetText(sourceTitle);
+      const snapshotPrice = typeof snapshot?.price === 'number'
+        ? this.ocrService.extractPriceFromText(`Price: ${snapshot.price}`)
+        : null;
+      const titlePrice = snapshotPrice ?? this.ocrService.extractPriceFromTitle(sourceTitle);
+      if (snapshot?.platformMode) this.ocrService.extractPlatformMode(snapshot.platformMode);
+      if (snapshot?.timeframe) this.ocrService.extractTimeframeFromText(snapshot.timeframe);
 
-      const now0 = Date.now();
-      const candleCacheFresh =
-        !!this.candleCache &&
-        (now0 - this.candleCache.capturedAt) < LiveScanner.CANDLE_CACHE_MAX_AGE_MS;
+      const now = Date.now();
+      const cacheAge = this.candleCache ? now - this.candleCache.capturedAt : Number.POSITIVE_INFINITY;
+      const cacheUsable = !!this.candleCache && cacheAge <= LiveScanner.CANDLE_CACHE_MAX_AGE_MS;
 
-      // FAST PATH: only use fast observation if DOM title yields asset + price AND candleCache has valid candles
-      if (titleAsset && titlePrice !== null && candleCacheFresh && this.candleCache && this.candleCache.candles.length >= 3) {
+      if (titleAsset && titlePrice !== null && cacheUsable) {
+        this.consecutiveQuoteMisses = 0;
+        if (cacheAge >= LiveScanner.HEAVY_SCAN_INTERVAL_MS) this.scheduleBackgroundCapture(sessionId);
         return this.buildFastObservation(
           sessionId,
           sourceTitle,
           titleAsset,
           titlePrice,
+          snapshot ? DataSource.DOM_BODY : DataSource.DOM_TITLE,
           diagnosticsTracker,
-          now0
+          now,
         );
       }
 
-      // --- Heavy path: capture + pixel analysis ---------------------------
-      diagnosticsTracker.recordStage(ScannerStage.CAPTURE, StageStatus.PASS, 'Screen capture started');
-
-      const displayId = 'primary';
-      const frame = await this.captureService.captureFrame(displayId, sessionId);
-
-      if (!frame || !frame.buffer || frame.width <= 0 || frame.height <= 0) {
-        diagnosticsTracker.recordStage(ScannerStage.CAPTURE, StageStatus.FAIL, 'Empty frame buffer');
-        const fallbackDiag = diagnosticsTracker.generateReport();
-        return {
-          observation: null,
-          diagnostics: fallbackDiag,
-          diagnosticsTracker,
-        };
-      }
-
-      if (this.isBlankFrame(frame.buffer)) {
-        diagnosticsTracker.recordStage(ScannerStage.FRAME, StageStatus.FAIL, 'Capture contains no visible workstation pixels');
-        return { observation: null, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
-      }
-
-      diagnosticsTracker.recordStage(ScannerStage.FRAME, StageStatus.PASS, `${frame.width}x${frame.height}`);
-
-      // 2. Locate Chart ROI
-      const roiCacheExpired = this.cachedChartRegionTimestamp > 0 && (Date.now() - this.cachedChartRegionTimestamp) > 10000;
-      let region: ChartRegion | null = roiCacheExpired ? null : this.cachedChartRegion;
-      if (!region) {
-        region = this.chartLocator.locateChart(
-          frame.buffer,
-          frame.width,
-          frame.height,
-          frame.scaleFactor
-        );
-        if (region && region.confidence >= 0.5) {
-          this.cachedChartRegion = region;
-          this.cachedChartRegionTimestamp = Date.now();
-        }
-      }
-
-      if (!region || region.confidence < 0.5) {
-        diagnosticsTracker.recordStage(ScannerStage.CHART_ROI, StageStatus.FAIL, 'Chart region could not be located');
-        return { observation: null, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
-      }
-
-      diagnosticsTracker.recordStage(ScannerStage.CHART_ROI, StageStatus.PASS, `${region.width}x${region.height} @ (${region.x},${region.y})`);
-
-      // 3. Candle Detection
-      const cropRatio = this.detectChartCropRatio(frame.buffer, frame.width, frame.height, region);
-      const candleScanRegion: ChartRegion = {
-        ...region,
-        height: Math.floor(region.height * cropRatio),
-      };
-
-      const candleResult = this.candleDetector.detect(
-        frame.buffer,
-        frame.width,
-        frame.height,
-        candleScanRegion
-      );
-
-      const candleCount = candleResult?.validatedCandleCount || 0;
-      diagnosticsTracker.recordStage(
-        ScannerStage.CANDLES,
-        candleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL,
-        `Validated: ${candleCount}`
-      );
+      const heavy = await this.captureAndAnalyze(sessionId, diagnosticsTracker);
+      if (!heavy) return { observation: null, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
+      const { frame, region, cropRatio, candleResult } = heavy;
+      const candleCount = candleResult.validatedCandleCount || 0;
 
       this.candleCache = {
-        candles: candleResult?.candles || [],
-        candleQuality: candleResult?.candleQuality || QualityLevel.ACCEPTABLE,
+        candles: candleResult.candles || [],
+        candleQuality: candleResult.candleQuality || QualityLevel.ACCEPTABLE,
         region,
         cropRatio,
         capturedAt: Date.now(),
       };
 
-      // 4. OCR Extraction
-      this.ocrService.triggerBackgroundOcr(frame.buffer, frame.width, frame.height, region);
+      const snapshotText = snapshot
+        ? [snapshot.asset, snapshot.price !== null ? `Price: ${snapshot.price}` : '', snapshot.timeframe, snapshot.platformMode]
+            .filter(Boolean).join(' | ')
+        : '';
+      const needFallbackText = titlePrice === null || !titleAsset;
+      const sourceText = needFallbackText
+        ? (snapshotText || await this.captureService.getActiveMarketText())
+        : snapshotText;
 
-      const needBodyText = titlePrice === null || !titleAsset;
-      let sourceText = '';
-      if (needBodyText) {
-        sourceText = await this.captureService.getActiveMarketText();
-      }
-
-      let extractedAsset: string | null = null;
-      if (titleAsset) {
-        this.ocrService.extractAssetFromTitle(sourceTitle);
-        extractedAsset = titleAsset;
-      } else {
-        extractedAsset = this.ocrService.extractAssetFromTitle(sourceText);
-      }
+      let extractedAsset: string | null = titleAsset;
+      if (extractedAsset) this.ocrService.extractAssetFromTitle(extractedAsset);
+      else extractedAsset = this.ocrService.extractAssetFromTitle(sourceText);
 
       const extractedPrice = titlePrice ?? (sourceText ? this.ocrService.extractPriceFromText(sourceText) : null);
-      const extractedTimeframe = sourceText ? this.ocrService.extractTimeframeFromText(sourceText) : null;
+      const extractedTimeframe = snapshot?.timeframe || (sourceText ? this.ocrService.extractTimeframeFromText(sourceText) : null);
       const ocrResults = this.ocrService.getCachedOcrResults();
-
-      const cleanAssetString = extractedAsset || (typeof ocrResults?.asset === 'string' ? ocrResults.asset : null);
+      const cleanAsset = extractedAsset || (typeof ocrResults?.asset === 'string' ? ocrResults.asset : null);
       const cleanTimeframe = extractedTimeframe || (typeof ocrResults?.timeframe === 'string' ? ocrResults.timeframe : null);
-      let cleanPrice: number | null = null;
-      if (extractedPrice !== null && extractedPrice !== undefined) {
-        cleanPrice = extractedPrice;
-      } else if (typeof ocrResults?.currentPrice === 'number') {
-        cleanPrice = ocrResults.currentPrice;
-      }
+      const cleanPrice = extractedPrice ?? (typeof ocrResults?.currentPrice === 'number' ? ocrResults.currentPrice : null);
 
       if (cleanPrice === null) {
-        this.ocrService
-          .runImageOcr(frame.buffer, frame.width, frame.height, region)
-          .catch(() => {});
+        this.consecutiveQuoteMisses++;
+        if (this.consecutiveQuoteMisses >= 3) {
+          this.ocrService.triggerBackgroundOcr(frame.buffer, frame.width, frame.height, region);
+        }
+      } else {
+        this.consecutiveQuoteMisses = 0;
       }
 
       diagnosticsTracker.recordStage(
         ScannerStage.OCR,
-        cleanAssetString ? StageStatus.PASS : StageStatus.PARTIAL,
-        cleanAssetString ? `Asset identified: ${cleanAssetString}` : 'Asset not identified'
+        cleanAsset ? StageStatus.PASS : StageStatus.PARTIAL,
+        cleanAsset ? `Asset identified: ${cleanAsset}` : 'Asset not identified',
       );
 
-      // 5. Build Market Observation
       const timestamp = Date.now();
-      const observationId = `obs_${frame.frameId}_${timestamp}`;
-      const dataQuality = this.deriveDataQuality(candleCount, candleResult?.candleQuality || QualityLevel.FAILED, region.confidence, cleanAssetString);
-      const assetIdentity = ocrResults?.assetIdentity || normalizeAsset(cleanAssetString, timestamp);
-      const platformMode = ocrResults?.platformMode || this.ocrService.extractPlatformMode(sourceTitle || sourceText);
-      const freshness = computeFreshness(timestamp);
-      const source = titlePrice !== null ? DataSource.DOM_TITLE : (sourceText ? DataSource.DOM_BODY : DataSource.OCR);
-
+      const dataQuality = this.deriveDataQuality(candleCount, candleResult.candleQuality, region.confidence, cleanAsset);
       const observation: MarketObservation = {
-        observationId,
+        observationId: `obs_${frame.frameId}_${timestamp}`,
         sessionId,
         frameId: frame.frameId,
         timestamp,
-        asset: cleanAssetString,
-        assetIdentity,
-        platformMode,
-        freshness,
-        source,
+        asset: cleanAsset,
+        assetIdentity: ocrResults?.assetIdentity || normalizeAsset(cleanAsset, timestamp),
+        platformMode: snapshot?.platformMode as PlatformMode || ocrResults?.platformMode || this.ocrService.extractPlatformMode(sourceTitle || sourceText),
+        freshness: computeFreshness(timestamp),
+        source: snapshot?.price !== null && snapshot?.price !== undefined
+          ? DataSource.DOM_BODY
+          : titlePrice !== null ? DataSource.DOM_TITLE : sourceText ? DataSource.DOM_BODY : DataSource.OCR,
         timeframe: cleanTimeframe,
         currentPrice: cleanPrice,
-        candles: candleResult?.candles || [],
-        candleQuality: candleResult?.candleQuality || QualityLevel.ACCEPTABLE,
+        candles: candleResult.candles || [],
+        candleQuality: candleResult.candleQuality || QualityLevel.ACCEPTABLE,
         captureQuality: QualityLevel.HIGH,
         chartQuality: region.confidence >= 0.8 ? QualityLevel.HIGH : QualityLevel.ACCEPTABLE,
         dataQuality,
@@ -233,23 +171,93 @@ export class LiveScanner {
       diagnosticsTracker.recordStage(
         ScannerStage.OBSERVATION,
         candleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL,
-        candleCount >= 3 ? 'Observation assembled' : 'Observation assembled with insufficient candle evidence'
+        candleCount >= 3 ? 'Observation assembled' : 'Observation assembled with insufficient candle evidence',
       );
-      const diagnosticsReport = diagnosticsTracker.generateReport();
+      return { observation, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
+    } catch (error) {
+      diagnosticsTracker.recordStage(ScannerStage.CAPTURE, StageStatus.FAIL, error instanceof Error ? error.message : String(error));
+      return { observation: null, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
+    }
+  }
 
-      return {
-        observation,
-        diagnostics: diagnosticsReport,
-        diagnosticsTracker,
-      };
-    } catch (e) {
-      diagnosticsTracker.recordStage(ScannerStage.CAPTURE, StageStatus.FAIL, (e as Error).message);
-      const fallbackDiag = diagnosticsTracker.generateReport();
-      return {
-        observation: null,
-        diagnostics: fallbackDiag,
-        diagnosticsTracker,
-      };
+  private scheduleBackgroundCapture(sessionId: SessionId): void {
+    if (this.backgroundCapturePending) return;
+    this.backgroundCapturePending = true;
+    const tracker = new DiagnosticsTracker();
+    void this.captureAndAnalyze(sessionId, tracker)
+      .then((heavy) => {
+        if (!heavy) return;
+        this.candleCache = {
+          candles: heavy.candleResult.candles || [],
+          candleQuality: heavy.candleResult.candleQuality || QualityLevel.ACCEPTABLE,
+          region: heavy.region,
+          cropRatio: heavy.cropRatio,
+          capturedAt: Date.now(),
+        };
+      })
+      .catch((error) => console.warn('[MARS SCANNER] Background chart refresh failed:', error))
+      .finally(() => { this.backgroundCapturePending = false; });
+  }
+
+  private async captureAndAnalyze(sessionId: SessionId, diagnostics: DiagnosticsTracker): Promise<{
+    frame: Awaited<ReturnType<ScreenCaptureService['captureFrame']>>;
+    region: ChartRegion;
+    cropRatio: number;
+    candleResult: PixelAnalysisResult['candleResult'];
+  } | null> {
+    diagnostics.recordStage(ScannerStage.CAPTURE, StageStatus.PASS, 'Bounded screen capture started');
+    const frame = await this.captureService.captureFrame('embedded', sessionId);
+    if (!frame?.buffer || frame.width <= 0 || frame.height <= 0) {
+      diagnostics.recordStage(ScannerStage.CAPTURE, StageStatus.FAIL, 'Empty frame buffer');
+      return null;
+    }
+    if (this.isBlankFrame(frame.buffer)) {
+      diagnostics.recordStage(ScannerStage.FRAME, StageStatus.FAIL, 'Capture contains no visible workstation pixels');
+      return null;
+    }
+    diagnostics.recordStage(ScannerStage.FRAME, StageStatus.PASS, `${frame.width}x${frame.height}`);
+
+    const regionCacheFresh = this.cachedChartRegion
+      && Date.now() - this.cachedChartRegionTimestamp <= LiveScanner.REGION_CACHE_MAX_AGE_MS;
+    const result = await this.analyzePixels(
+      frame.buffer,
+      frame.width,
+      frame.height,
+      regionCacheFresh ? this.cachedChartRegion : null,
+    );
+    const region = result.region;
+    if (!region || region.confidence < 0.5) {
+      diagnostics.recordStage(ScannerStage.CHART_ROI, StageStatus.FAIL, 'Chart region could not be located');
+      return null;
+    }
+    this.cachedChartRegion = region;
+    this.cachedChartRegionTimestamp = Date.now();
+    diagnostics.recordStage(ScannerStage.CHART_ROI, StageStatus.PASS, `${region.width}x${region.height} @ (${region.x},${region.y})`);
+    diagnostics.recordStage(
+      ScannerStage.CANDLES,
+      result.candleResult.validatedCandleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL,
+      `Worker validated: ${result.candleResult.validatedCandleCount}`,
+    );
+    return { frame, ...result };
+  }
+
+  private async analyzePixels(
+    buffer: Buffer,
+    width: number,
+    height: number,
+    regionHint?: ChartRegion | null,
+  ): Promise<PixelAnalysisResult> {
+    try {
+      return await this.pixelWorker.analyze(buffer, width, height, regionHint);
+    } catch (error) {
+      console.warn('[MARS SCANNER] Pixel worker unavailable; using bounded local fallback:', error);
+      const region = regionHint || this.chartLocator.locateChart(buffer, width, height, 1);
+      const cropRatio = this.detectChartCropRatio(buffer, width, height, region);
+      const candleResult = this.candleDetector.detect(buffer, width, height, {
+        ...region,
+        height: Math.max(1, Math.floor(region.height * cropRatio)),
+      });
+      return { region, cropRatio, candleResult };
     }
   }
 
@@ -258,66 +266,41 @@ export class LiveScanner {
     sourceTitle: string,
     asset: string,
     price: number,
+    source: DataSource,
     diagnosticsTracker: DiagnosticsTracker,
-    now: number
+    now: number,
   ): ScanResult {
-    const assetIdentity = this.ocrService.extractAssetIdentityFromTitle(sourceTitle) || normalizeAsset(asset, now);
-    this.ocrService.extractPriceFromTitle(sourceTitle);
+    const assetIdentity = this.ocrService.extractAssetIdentityFromTitle(sourceTitle || asset) || normalizeAsset(asset, now);
+    this.ocrService.extractPriceFromText(`Price: ${price}`);
     const platformMode = this.ocrService.extractPlatformMode(sourceTitle);
+    const cache = this.candleCache!;
+    const cacheAge = Math.max(0, now - cache.capturedAt);
+    const cacheDegraded = cacheAge > LiveScanner.HEAVY_SCAN_INTERVAL_MS * 2;
+    const candleQuality = cacheDegraded ? QualityLevel.LOW : cache.candleQuality;
+    const candleCount = cache.candles.length;
+    const dataQuality = this.deriveDataQuality(candleCount, candleQuality, cache.region.confidence, asset);
 
-    const cache = this.candleCache;
-    const timestamp = now;
-    const observationId = `obs_fast_${timestamp}`;
-    const candles = cache?.candles || [];
-    const candleQuality = cache?.candleQuality || QualityLevel.LOW;
-    const candleCount = candles.length;
-    const chartConfidence = cache?.region.confidence || 0;
-    const dataQuality = this.deriveDataQuality(
-      candleCount,
-      candleQuality,
-      chartConfidence,
-      asset
-    );
-
-    diagnosticsTracker.recordStage(
-      ScannerStage.CAPTURE,
-      cache ? StageStatus.PASS : StageStatus.PARTIAL,
-      cache
-        ? `DOM fast-path (candle cache ${Math.round((now - cache.capturedAt) / 1000)}s old)`
-        : 'DOM fast-path (waiting for first chart capture)'
-    );
-    diagnosticsTracker.recordStage(
-      ScannerStage.CHART_ROI,
-      cache ? StageStatus.PASS : StageStatus.PARTIAL,
-      cache
-        ? `Cached region ${cache.region.width}x${cache.region.height} @ (${cache.region.x},${cache.region.y})`
-        : 'Chart ROI not available yet; background capture pending'
-    );
-    diagnosticsTracker.recordStage(
-      ScannerStage.CANDLES,
-      candleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL,
-      cache ? `Cached: ${candleCount}` : 'Candle cache warming'
-    );
-    diagnosticsTracker.recordStage(ScannerStage.OCR, StageStatus.PASS, `Asset identified from title: ${asset}`);
+    diagnosticsTracker.recordStage(ScannerStage.CAPTURE, StageStatus.PASS, `Quote fast-path; chart cache ${Math.round(cacheAge / 1000)}s old`);
+    diagnosticsTracker.recordStage(ScannerStage.CHART_ROI, StageStatus.PASS, `Cached region ${cache.region.width}x${cache.region.height}`);
+    diagnosticsTracker.recordStage(ScannerStage.CANDLES, candleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL, `Cached: ${candleCount}`);
+    diagnosticsTracker.recordStage(ScannerStage.OCR, StageStatus.PASS, `Targeted quote feed: ${asset}`);
 
     const observation: MarketObservation = {
-      observationId,
+      observationId: `obs_fast_${now}`,
       sessionId,
-      frameId: `fast-${timestamp}`,
-      timestamp,
+      frameId: `fast-${now}`,
+      timestamp: now,
       asset,
       assetIdentity,
       platformMode,
-      freshness: computeFreshness(timestamp),
-      source: DataSource.DOM_TITLE,
+      freshness: computeFreshness(now),
+      source,
       timeframe: null,
       currentPrice: price,
-      candles,
+      candles: cache.candles,
       candleQuality,
-      captureQuality: cache ? QualityLevel.HIGH : QualityLevel.LOW,
-      chartQuality: cache
-        ? (cache.region.confidence >= 0.8 ? QualityLevel.HIGH : QualityLevel.ACCEPTABLE)
-        : QualityLevel.LOW,
+      captureQuality: cacheDegraded ? QualityLevel.LOW : QualityLevel.HIGH,
+      chartQuality: cacheDegraded ? QualityLevel.LOW : cache.region.confidence >= 0.8 ? QualityLevel.HIGH : QualityLevel.ACCEPTABLE,
       dataQuality,
       trendEvidence: null,
       momentumEvidence: null,
@@ -326,44 +309,17 @@ export class LiveScanner {
       supportResistanceEvidence: null,
       patternEvidence: null,
     };
-
-    diagnosticsTracker.recordStage(
-      ScannerStage.OBSERVATION,
-      candleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL,
-      candleCount >= 3
-        ? 'Observation assembled (fast path)'
-        : 'Observation assembled while candle cache is warming'
-    );
-    const diagnosticsReport = diagnosticsTracker.generateReport();
-
-    return {
-      observation,
-      diagnostics: diagnosticsReport,
-      diagnosticsTracker,
-    };
+    diagnosticsTracker.recordStage(ScannerStage.OBSERVATION, candleCount >= 3 ? StageStatus.PASS : StageStatus.PARTIAL, 'Observation assembled from live quote and worker cache');
+    return { observation, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
   }
 
-  async scanFrame(
-    sessionId: SessionId,
-    frameBuffer: Buffer,
-    width: number,
-    height: number
-  ): Promise<ScanResult> {
+  async scanFrame(sessionId: SessionId, frameBuffer: Buffer, width: number, height: number): Promise<ScanResult> {
     const diagnosticsTracker = new DiagnosticsTracker();
-
     diagnosticsTracker.recordStage(ScannerStage.CAPTURE, StageStatus.PASS, 'Frame supplied directly');
     diagnosticsTracker.recordStage(ScannerStage.FRAME, StageStatus.PASS, `${width}x${height}`);
-
-    const region = this.chartLocator.locateChart(frameBuffer, width, height, 1.0);
-    diagnosticsTracker.recordStage(ScannerStage.CHART_ROI, StageStatus.PASS, `${region.width}x${region.height} @ (${region.x},${region.y})`);
-
-    const candleScanRegion: ChartRegion = {
-      ...region,
-      height: Math.floor(region.height * 0.70),
-    };
-
-    const candleResult = this.candleDetector.detect(frameBuffer, width, height, candleScanRegion);
-    diagnosticsTracker.recordStage(ScannerStage.CANDLES, StageStatus.PASS, `Count: ${candleResult.validatedCandleCount}`);
+    const result = await this.analyzePixels(frameBuffer, width, height, null);
+    diagnosticsTracker.recordStage(ScannerStage.CHART_ROI, StageStatus.PASS, `${result.region.width}x${result.region.height} @ (${result.region.x},${result.region.y})`);
+    diagnosticsTracker.recordStage(ScannerStage.CANDLES, StageStatus.PASS, `Count: ${result.candleResult.validatedCandleCount}`);
 
     const timestamp = Date.now();
     const frameId = `frame-${timestamp}`;
@@ -373,10 +329,10 @@ export class LiveScanner {
       frameId,
       timestamp,
       captureQuality: QualityLevel.HIGH,
-      chartQuality: region.confidence >= 0.8 ? QualityLevel.HIGH : QualityLevel.ACCEPTABLE,
-      candleQuality: candleResult.candleQuality,
+      chartQuality: result.region.confidence >= 0.8 ? QualityLevel.HIGH : QualityLevel.ACCEPTABLE,
+      candleQuality: result.candleResult.candleQuality,
       dataQuality: QualityLevel.HIGH,
-      candles: candleResult.candles,
+      candles: result.candleResult.candles,
       asset: null,
       assetIdentity: null,
       platformMode: PlatformMode.UNKNOWN,
@@ -391,15 +347,8 @@ export class LiveScanner {
       supportResistanceEvidence: null,
       patternEvidence: null,
     };
-
     diagnosticsTracker.recordStage(ScannerStage.OBSERVATION, StageStatus.PASS, 'MarketObservation assembled');
-    const diagnosticsReport = diagnosticsTracker.generateReport();
-
-    return {
-      observation,
-      diagnostics: diagnosticsReport,
-      diagnosticsTracker,
-    };
+    return { observation, diagnostics: diagnosticsTracker.generateReport(), diagnosticsTracker };
   }
 
   setImageOcrEnabled(enabled: boolean): void {
@@ -408,8 +357,11 @@ export class LiveScanner {
 
   clearCache(): void {
     this.cachedChartRegion = null;
+    this.cachedChartRegionTimestamp = 0;
     this.candleCache = null;
     this.scanCount = 0;
+    this.consecutiveQuoteMisses = 0;
+    this.backgroundCapturePending = false;
     this.captureService.clearCache();
     this.ocrService.clearCache();
   }
@@ -417,36 +369,24 @@ export class LiveScanner {
   private detectChartCropRatio(buffer: Buffer, frameW: number, frameH: number, region: ChartRegion): number {
     const startY = region.y + Math.floor(region.height * 0.55);
     const endY = region.y + Math.floor(region.height * 0.85);
-    const sampleX1 = region.x + Math.floor(region.width * 0.2);
-    const sampleX2 = region.x + Math.floor(region.width * 0.5);
-    const sampleX3 = region.x + Math.floor(region.width * 0.8);
-
+    const sampleXs = [0.2, 0.5, 0.8].map((ratio) => region.x + Math.floor(region.width * ratio));
     for (let y = startY; y < endY; y++) {
       let darkCount = 0;
-      for (const sx of [sampleX1, sampleX2, sampleX3]) {
-        const clampedX = Math.max(0, Math.min(sx, frameW - 1));
-        const clampedY = Math.max(0, Math.min(y, frameH - 1));
-        const idx = (clampedY * frameW + clampedX) * 4;
-        if (idx + 3 < buffer.length) {
-          const b = buffer[idx];
-          const g = buffer[idx + 1];
-          const r = buffer[idx + 2];
-          if (r < 80 && g < 80 && b < 80) darkCount++;
-        }
+      for (const sx of sampleXs) {
+        const x = Math.max(0, Math.min(sx, frameW - 1));
+        const cy = Math.max(0, Math.min(y, frameH - 1));
+        const idx = (cy * frameW + x) * 4;
+        if (idx + 3 < buffer.length && buffer[idx + 2] < 80 && buffer[idx + 1] < 80 && buffer[idx] < 80) darkCount++;
       }
-      if (darkCount >= 3) {
-        const ratio = (y - region.y) / region.height;
-        return Math.max(0.55, Math.min(0.85, ratio));
-      }
+      if (darkCount >= 3) return Math.max(0.55, Math.min(0.85, (y - region.y) / region.height));
     }
-
     return 0.72;
   }
 
   private isBlankFrame(buffer: Buffer): boolean {
     const pixelCount = Math.floor(buffer.length / 4);
     if (pixelCount === 0) return true;
-    const step = Math.max(1, Math.floor(pixelCount / 4_000));
+    const step = Math.max(1, Math.floor(pixelCount / 4000));
     let nonBlackSamples = 0;
     for (let pixel = 0; pixel < pixelCount; pixel += step) {
       const offset = pixel * 4;
@@ -461,11 +401,9 @@ export class LiveScanner {
 
   async terminate(): Promise<void> {
     try {
-      if ('terminate' in this.ocrService && typeof (this.ocrService as any).terminate === 'function') {
-        await (this.ocrService as any).terminate();
-      }
-    } catch (err) {
-      console.error('[MARS] Error terminating scanner OCR service:', err);
+      await Promise.allSettled([this.ocrService.terminate(), this.pixelWorker.terminate()]);
+    } catch (error) {
+      console.error('[MARS] Error terminating scanner services:', error);
     } finally {
       this.clearCache();
     }
@@ -477,15 +415,9 @@ export class LiveScanner {
     chartConfidence: number,
     asset: string | null,
   ): QualityLevel {
-    if (!asset || candleCount < 3 || candleQuality === QualityLevel.FAILED || chartConfidence < 0.5) {
-      return QualityLevel.FAILED;
-    }
-    if (candleCount < LiveScanner.MIN_SIGNAL_CANDLES || candleQuality === QualityLevel.LOW || chartConfidence < 0.65) {
-      return QualityLevel.LOW;
-    }
-    if (candleQuality === QualityLevel.ACCEPTABLE || chartConfidence < 0.8) {
-      return QualityLevel.ACCEPTABLE;
-    }
+    if (!asset || candleCount < 3 || candleQuality === QualityLevel.FAILED || chartConfidence < 0.5) return QualityLevel.FAILED;
+    if (candleCount < LiveScanner.MIN_SIGNAL_CANDLES || candleQuality === QualityLevel.LOW || chartConfidence < 0.65) return QualityLevel.LOW;
+    if (candleQuality === QualityLevel.ACCEPTABLE || chartConfidence < 0.8) return QualityLevel.ACCEPTABLE;
     return QualityLevel.HIGH;
   }
 }

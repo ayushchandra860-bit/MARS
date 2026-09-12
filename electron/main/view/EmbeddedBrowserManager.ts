@@ -1,5 +1,6 @@
 // ============================================================
 // MARS PRO V3 — Hardened Embedded Browser Manager
+// Adaptive rendering, lightweight quote heartbeat, and bounded capture.
 // ============================================================
 
 import { BrowserWindow, BrowserView, session, app } from 'electron';
@@ -23,12 +24,60 @@ import {
   parseBrowserTradeResultMessage,
 } from './embeddedEventValidation';
 
+const MARKET_SNAPSHOT_PREFIX = '[MARS_MARKET_SNAPSHOT]:';
+const ACTIVE_FRAME_RATE = 60;
+const BACKGROUND_FRAME_RATE = 30;
+const HIDDEN_FRAME_RATE = 5;
+const CAPTURE_MAX_WIDTH = 960;
+
+export interface EmbeddedMarketSnapshot {
+  asset: string | null;
+  price: number | null;
+  timeframe: string | null;
+  platformMode: 'DEMO' | 'LIVE' | 'UNKNOWN';
+  title: string;
+  observedAt: number;
+}
+
+function parseMarketSnapshotMessage(message: string): EmbeddedMarketSnapshot | null {
+  if (typeof message !== 'string' || !message.startsWith(MARKET_SNAPSHOT_PREFIX)) return null;
+  try {
+    const raw = JSON.parse(message.slice(MARKET_SNAPSHOT_PREFIX.length)) as Record<string, unknown>;
+    const observedAt = typeof raw.observedAt === 'number' && Number.isFinite(raw.observedAt)
+      ? Math.floor(raw.observedAt)
+      : 0;
+    if (observedAt <= 0 || Math.abs(Date.now() - observedAt) > 60_000) return null;
+
+    const price = typeof raw.price === 'number' && Number.isFinite(raw.price) && raw.price > 0 && raw.price < 1e12
+      ? raw.price
+      : null;
+    const asset = typeof raw.asset === 'string' && raw.asset.trim().length >= 2 && raw.asset.length <= 80
+      ? raw.asset.trim()
+      : null;
+    const timeframe = typeof raw.timeframe === 'string' && raw.timeframe.length <= 30
+      ? raw.timeframe.trim() || null
+      : null;
+    const mode = raw.platformMode === 'DEMO' || raw.platformMode === 'LIVE'
+      ? raw.platformMode
+      : 'UNKNOWN';
+    const title = typeof raw.title === 'string' ? raw.title.slice(0, 300) : '';
+    if (price === null && asset === null) return null;
+
+    return { asset, price, timeframe, platformMode: mode, title, observedAt };
+  } catch {
+    return null;
+  }
+}
+
 export class EmbeddedBrowserManager {
   private static instance: EmbeddedBrowserManager | null = null;
   private browserView: BrowserView | null = null;
   private parentWindow: BrowserWindow | null = null;
   private currentUrl = OLYMP_TRADE_PLATFORM_URL;
   private tradeClickHandler: ((event: BrowserTradeClickEvent) => void) | null = null;
+  private marketSnapshotHandler: ((snapshot: EmbeddedMarketSnapshot) => void) | null = null;
+  private latestMarketSnapshot: EmbeddedMarketSnapshot | null = null;
+  private captureInFlight: Promise<CapturedFrame> | null = null;
   private isVisible = true;
   private isFocusMode = false;
   private readonly TOOLBAR_HEIGHT = 36;
@@ -58,12 +107,14 @@ export class EmbeddedBrowserManager {
         contextIsolation: true,
         sandbox: true,
         webSecurity: true,
+        backgroundThrottling: false,
       },
     });
     const contents = this.browserView.webContents;
     this.parentWindow.setBrowserView(this.browserView);
     this.updateBounds();
-    contents.setFrameRate(15);
+    this.applyFrameRate();
+    try { contents.setBackgroundThrottling(false); } catch {}
     contents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
     const blockUntrustedNavigation = (event: Electron.Event, targetUrl: string) => {
@@ -75,12 +126,13 @@ export class EmbeddedBrowserManager {
     contents.on('will-navigate', blockUntrustedNavigation);
     contents.on('will-redirect', blockUntrustedNavigation);
 
-    parentWindow.on('focus', () => {
-      try { if (this.browserView && !this.browserView.webContents.isDestroyed()) this.browserView.webContents.setFrameRate(15); } catch {}
-    });
-    parentWindow.on('blur', () => {
-      try { if (this.browserView && !this.browserView.webContents.isDestroyed()) this.browserView.webContents.setFrameRate(1); } catch {}
-    });
+    const refreshRate = () => this.applyFrameRate();
+    parentWindow.on('focus', refreshRate);
+    parentWindow.on('blur', refreshRate);
+    parentWindow.on('show', refreshRate);
+    parentWindow.on('hide', refreshRate);
+    parentWindow.on('minimize', refreshRate);
+    parentWindow.on('restore', refreshRate);
 
     contents.on('render-process-gone', (_event, details) => {
       console.error(`[MARS BROWSER] Page renderer gone (${details.reason}); scheduling a safe reload.`);
@@ -117,7 +169,7 @@ export class EmbeddedBrowserManager {
     contents.on('page-title-updated', (_event, title) => {
       if (!isTrustedOlympTradeUrl(contents.getURL())) return;
       const now = Date.now();
-      if (typeof title === 'string' && title.length <= 300 && title !== lastForwardedTitle && now - lastTitleForwardAt >= 2000) {
+      if (typeof title === 'string' && title.length <= 300 && title !== lastForwardedTitle && now - lastTitleForwardAt >= 1000) {
         lastForwardedTitle = title;
         lastTitleForwardAt = now;
         if (this.parentWindow && !this.parentWindow.isDestroyed() && !this.parentWindow.webContents.isDestroyed()) {
@@ -135,6 +187,15 @@ export class EmbeddedBrowserManager {
     contents.on('console-message', (_event, _level, message, _line, sourceId) => {
       if (!isTrustedOlympTradeUrl(contents.getURL())) return;
       if (sourceId && /^https?:/i.test(sourceId) && !isTrustedOlympTradeUrl(sourceId)) return;
+
+      const snapshot = parseMarketSnapshotMessage(message);
+      if (snapshot) {
+        this.latestMarketSnapshot = snapshot;
+        try { this.marketSnapshotHandler?.({ ...snapshot }); } catch (error) {
+          console.error('[MARS Browser Detector] Market snapshot subscriber failed:', error);
+        }
+        return;
+      }
 
       const click = parseBrowserTradeClickMessage(message);
       if (click) {
@@ -159,9 +220,6 @@ export class EmbeddedBrowserManager {
           trade = manager.findTradeByExecutionId(click.executionId);
         }
 
-        // If analysis is stopped or unavailable, retain a safe unlinked journal
-        // row rather than losing the user's real execution. The staged evidence
-        // still overrides every fallback field.
         if (!trade) {
           trade = manager.registerTrade({
             sessionId: 'live-browser',
@@ -197,8 +255,31 @@ export class EmbeddedBrowserManager {
     });
   }
 
+  private applyFrameRate(): void {
+    if (!this.browserView || this.browserView.webContents.isDestroyed()) return;
+    const parentHidden = !this.parentWindow
+      || this.parentWindow.isDestroyed()
+      || !this.parentWindow.isVisible()
+      || this.parentWindow.isMinimized();
+    const nextRate = !this.isVisible || parentHidden
+      ? HIDDEN_FRAME_RATE
+      : this.parentWindow?.isFocused() ? ACTIVE_FRAME_RATE : BACKGROUND_FRAME_RATE;
+    try { this.browserView.webContents.setFrameRate(nextRate); } catch {}
+  }
+
   public setTradeClickHandler(handler: ((event: BrowserTradeClickEvent) => void) | null): void {
     this.tradeClickHandler = handler;
+  }
+
+  public setMarketSnapshotHandler(handler: ((snapshot: EmbeddedMarketSnapshot) => void) | null): void {
+    this.marketSnapshotHandler = handler;
+    if (handler && this.latestMarketSnapshot) handler({ ...this.latestMarketSnapshot });
+  }
+
+  public getMarketSnapshot(maxAgeMs = 3000): EmbeddedMarketSnapshot | null {
+    const snapshot = this.latestMarketSnapshot;
+    if (!snapshot || Date.now() - snapshot.observedAt > Math.max(250, maxAgeMs)) return null;
+    return { ...snapshot };
   }
 
   public setTradeResultHandler(_handler: ((event: { outcome: string; amount: number; rawText: string; timestamp: number }) => void) | null): void {}
@@ -223,11 +304,13 @@ export class EmbeddedBrowserManager {
     if (this.parentWindow && !this.parentWindow.isDestroyed() && this.browserView) {
       this.parentWindow.setBrowserView(this.browserView);
       this.updateBounds();
+      this.applyFrameRate();
     }
   }
 
   public hide(): void {
     this.isVisible = false;
+    this.applyFrameRate();
     if (this.parentWindow && !this.parentWindow.isDestroyed() && this.browserView) {
       this.parentWindow.setBrowserView(null);
       this.browserView.setBounds({ x: -9999, y: -9999, width: 0, height: 0 });
@@ -295,26 +378,62 @@ export class EmbeddedBrowserManager {
 
   public async getVisibleText(): Promise<string> {
     if (!this.browserView || this.browserView.webContents.isDestroyed() || !isTrustedOlympTradeUrl(this.browserView.webContents.getURL())) return '';
+    const script = `(() => {
+      const selectors = [
+        '[data-test="asset-select-button"]', '[data-test="asset-name"]',
+        '[data-test="current-price"]', '[data-test="current-quote"]',
+        '[data-test="expiration-input"]', '[data-test="expiry-time"]',
+        '[data-test*="account-mode"]', '[data-test*="account-type"]'
+      ];
+      const parts = [document.title || ''];
+      for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (element) parts.push(String(element.value || element.textContent || '').trim());
+      }
+      return parts.filter(Boolean).join(' | ').slice(0, 1500);
+    })()`;
     try {
-      const scrape = this.browserView.webContents.executeJavaScript('document.body ? document.body.innerText.slice(0, 12000) : ""', false);
-      return await Promise.race([scrape, new Promise<string>((resolve) => setTimeout(() => resolve(''), 2000))]);
+      const scrape = this.browserView.webContents.executeJavaScript(script, false);
+      return await Promise.race([scrape, new Promise<string>((resolve) => setTimeout(() => resolve(''), 750))]);
     } catch { return ''; }
   }
 
   public async captureFrame(sessionId: string = 'live'): Promise<CapturedFrame> {
+    if (this.captureInFlight) {
+      const existing = await this.captureInFlight;
+      return { ...existing, sessionId };
+    }
+    const capture = this.captureFrameInternal(sessionId);
+    this.captureInFlight = capture;
+    try {
+      return await capture;
+    } finally {
+      if (this.captureInFlight === capture) this.captureInFlight = null;
+    }
+  }
+
+  private async captureFrameInternal(sessionId: string): Promise<CapturedFrame> {
     if (!this.browserView || this.browserView.webContents.isDestroyed() || !isTrustedOlympTradeUrl(this.browserView.webContents.getURL())) {
       throw new Error('Trusted Browser Workstation is not available for capture');
     }
     try {
-      const image = await Promise.race([
+      const sourceImage = await Promise.race([
         this.browserView.webContents.capturePage(),
-        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('capturePage timed out')), 3000)),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('capturePage timed out')), 2500)),
       ]);
-      if (!image || image.isEmpty()) throw new Error('Browser Workstation returned an empty capture');
-      const size = image.getSize();
+      if (!sourceImage || sourceImage.isEmpty()) throw new Error('Browser Workstation returned an empty capture');
+      const sourceSize = sourceImage.getSize();
+      const analysisImage = sourceSize.width > CAPTURE_MAX_WIDTH
+        ? sourceImage.resize({
+            width: CAPTURE_MAX_WIDTH,
+            height: Math.max(1, Math.round(sourceSize.height * (CAPTURE_MAX_WIDTH / sourceSize.width))),
+            quality: 'good',
+          })
+        : sourceImage;
+      const size = analysisImage.getSize();
       return {
         frameId: randomUUID(), sessionId, timestamp: Date.now(), displayId: 'embedded',
-        buffer: image.toBitmap(), width: size.width || this.bounds.width,
+        buffer: analysisImage.toBitmap(), width: size.width || this.bounds.width,
         height: size.height || this.bounds.height, scaleFactor: 1,
       };
     } catch (error) {
@@ -322,7 +441,9 @@ export class EmbeddedBrowserManager {
     }
   }
 
-  public clearCache(): void {}
+  public clearCache(): void {
+    this.latestMarketSnapshot = null;
+  }
 
   public destroy(): void {
     if (this.browserView) {
@@ -331,6 +452,9 @@ export class EmbeddedBrowserManager {
       this.browserView = null;
     }
     this.tradeClickHandler = null;
+    this.marketSnapshotHandler = null;
+    this.latestMarketSnapshot = null;
+    this.captureInFlight = null;
     this.parentWindow = null;
     this.currentUrl = OLYMP_TRADE_PLATFORM_URL;
   }

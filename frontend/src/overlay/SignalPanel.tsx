@@ -52,63 +52,49 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
     ? (systemStatus === 'DEGRADED' ? 'DEGRADED' : 'UNAVAILABLE')
     : (!isAssetLocked ? 'SEARCHING' : (rawAction || 'WAIT'));
 
-  // Entry guidance & countdown with 1s local interpolation
+  // One absolute-time ticker drives both countdowns without recreating intervals.
   const entryCountdownSec = state?.entryCountdownSec ?? null;
   const entryGuidance = state?.entryGuidance || anyState.entry;
-  const [localVisualSec, setLocalVisualSec] = useState<number | null>(null);
-  const [localExpirySec, setLocalExpirySec] = useState<number | null>(null);
+  const tradeRemaining = typeof tradeMonitor?.remainingSeconds === 'number' ? tradeMonitor.remainingSeconds : null;
+  const tradeSignalId = tradeMonitor?.signalId || activeTrade?.signalId || null;
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const lastSyncRef = useRef<{ val: number | null; time: number }>({ val: null, time: 0 });
   const lastExpirySyncRef = useRef<{ val: number | null; time: number; signalId: string | null }>({ val: null, time: 0, signalId: null });
 
   useEffect(() => {
-    if (typeof entryCountdownSec === 'number') {
-      lastSyncRef.current = { val: entryCountdownSec, time: Date.now() };
-      setLocalVisualSec(entryCountdownSec);
-    } else {
-      lastSyncRef.current = { val: null, time: 0 };
-      setLocalVisualSec(null);
-    }
+    const now = Date.now();
+    lastSyncRef.current = typeof entryCountdownSec === 'number'
+      ? { val: entryCountdownSec, time: now }
+      : { val: null, time: 0 };
+    setClockNow(now);
   }, [entryCountdownSec]);
 
   useEffect(() => {
-    if (typeof localVisualSec !== 'number' || localVisualSec <= 0) return;
-    const timer = setInterval(() => {
-      const { val, time } = lastSyncRef.current;
-      if (typeof val === 'number' && time > 0) {
-        setLocalVisualSec(Math.max(0, val - Math.floor((Date.now() - time) / 1000)));
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [localVisualSec]);
-
-  const tradeRemaining = typeof tradeMonitor?.remainingSeconds === 'number' ? tradeMonitor.remainingSeconds : null;
-  useEffect(() => {
     const remaining = tradeRemaining ?? activeTrade?.remainingSeconds ?? null;
-    if (typeof remaining === 'number') {
-      lastExpirySyncRef.current = { val: remaining, time: Date.now(), signalId: tradeMonitor?.signalId || activeTrade?.signalId || null };
-      setLocalExpirySec(remaining);
-    } else {
-      lastExpirySyncRef.current = { val: null, time: 0, signalId: null };
-      setLocalExpirySec(null);
-    }
-  }, [
-    tradeRemaining,
-    activeTrade?.remainingSeconds,
-    activeTrade?.entryTimestamp,
-    tradeMonitor?.signalId,
-    activeTrade?.signalId,
-  ]);
+    const now = Date.now();
+    lastExpirySyncRef.current = typeof remaining === 'number'
+      ? { val: remaining, time: now, signalId: tradeSignalId }
+      : { val: null, time: 0, signalId: null };
+    setClockNow(now);
+  }, [tradeRemaining, activeTrade?.remainingSeconds, activeTrade?.entryTimestamp, tradeSignalId]);
 
+  const shouldTick = typeof entryCountdownSec === 'number'
+    || typeof tradeRemaining === 'number'
+    || typeof activeTrade?.remainingSeconds === 'number';
   useEffect(() => {
-    const timer = setInterval(() => {
-      const { val, time, signalId } = lastExpirySyncRef.current;
-      const curId = tradeMonitor?.signalId || activeTrade?.signalId || null;
-      if (typeof val === 'number' && time > 0 && signalId === curId) {
-        setLocalExpirySec(Math.max(0, val - Math.floor((Date.now() - time) / 1000)));
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [tradeMonitor?.signalId, activeTrade?.signalId, activeTrade?.entryTimestamp]);
+    if (!shouldTick) return;
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [shouldTick]);
+
+  const localVisualSec = typeof lastSyncRef.current.val === 'number' && lastSyncRef.current.time > 0
+    ? Math.max(0, lastSyncRef.current.val - Math.floor((clockNow - lastSyncRef.current.time) / 1000))
+    : null;
+  const localExpirySec = typeof lastExpirySyncRef.current.val === 'number'
+    && lastExpirySyncRef.current.time > 0
+    && lastExpirySyncRef.current.signalId === tradeSignalId
+    ? Math.max(0, lastExpirySyncRef.current.val - Math.floor((clockNow - lastExpirySyncRef.current.time) / 1000))
+    : null;
 
   const normalizePercent = (value: unknown): number | null => {
     if (typeof value === 'number' && !isNaN(value)) {
@@ -121,6 +107,11 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
       if (!isNaN(parsed)) return normalizePercent(parsed);
     }
     return null;
+  };
+
+  const normalizePrice = (value: unknown): number | null => {
+    const parsed = typeof value === 'number' ? value : Number(String(value ?? '').replace(/,/g, '').trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   };
 
   const calibrationActive = !!state?.calibrationActive;
@@ -199,6 +190,8 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
 
   // ---- Trade monitor (Section 2) ----
   const tm = tradeMonitor;
+  const monitorEntryPrice = normalizePrice(tm?.entryPrice);
+  const monitorCurrentPrice = normalizePrice(tm?.currentPrice);
   const pnlPct = typeof tm?.pnlPct === 'number' ? tm.pnlPct : null;
   const pnlColor = pnlPct === null ? 'var(--text-muted)' : pnlPct >= 0 ? 'var(--color-emerald)' : 'var(--color-coral)';
   const healthColor = tm?.health === 'IN PROFIT' ? 'var(--color-emerald)' : tm?.health === 'AGAINST' ? 'var(--color-coral)' : 'var(--color-amber)';
@@ -373,10 +366,10 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '4px' }}>
               <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                ENTRY {typeof tm.entryPrice === 'number' ? tm.entryPrice.toFixed(5) : '--'}
+                ENTRY {monitorEntryPrice !== null ? monitorEntryPrice.toFixed(5) : '--'}
               </span>
               <span style={{ fontSize: '11px', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontWeight: 700 }}>
-                NOW {typeof tm.currentPrice === 'number' ? tm.currentPrice.toFixed(5) : '--'}
+                NOW {monitorCurrentPrice !== null ? monitorCurrentPrice.toFixed(5) : '--'}
               </span>
               <span style={{ fontSize: '13px', fontWeight: 800, color: pnlColor, fontFamily: 'var(--font-mono)' }}>
                 {pnlPct === null ? '--' : (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%'}
