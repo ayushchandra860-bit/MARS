@@ -241,23 +241,29 @@ export class AnalysisController {
   // ----------------------------------------------------------
 
   private startScanLoop(intervalMs: number): void {
-    if (this.scanTimer) {
-      clearInterval(this.scanTimer);
-    }
-    this.scanTimer = setInterval(() => {
-      this.runScanCycle().catch((err) => {
-        console.error('[MARS] Unhandled scan cycle error:', err);
-      });
-    }, intervalMs);
+    this.stopScanLoop();
+    const scheduleNext = (): void => {
+      if (this.state !== AnalysisState.RUNNING) return;
+      this.scanTimer = setTimeout(async () => {
+        this.scanTimer = null;
+        try {
+          await this.runScanCycle();
+        } catch (err) {
+          console.error('[MARS] Unhandled scan cycle error:', err);
+        } finally {
+          scheduleNext();
+        }
+      }, intervalMs);
+    };
+    scheduleNext();
   }
 
   private stopScanLoop(): void {
     if (this.scanTimer) {
-      clearInterval(this.scanTimer);
+      clearTimeout(this.scanTimer);
       this.scanTimer = null;
     }
   }
-
   private async runScanCycle(): Promise<void> {
     if (this.isScanningActive || this.state !== AnalysisState.RUNNING) return;
     this.isScanningActive = true;
