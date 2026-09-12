@@ -19,7 +19,7 @@ import { OverlayManager } from '../overlay/OverlayManager';
 import { SessionId } from '../../../shared/types/scanner';
 import { AnalysisState, SystemStatus } from '../../../shared/types/session';
 import { ScannerStage, StageStatus } from '../../../shared/types/diagnostics';
-import { TradingAction, SignalLifecycle, RiskLevel, SignalStatusLabel, TradeStatusLabel, SignalStatusState, TradeStatusState, TradeHealth, TradeExplanation } from '../../../shared/types/decision';
+import { TradingAction, TradeState, SignalLifecycle, RiskLevel, SignalStatusLabel, TradeStatusLabel, SignalStatusState, TradeStatusState, TradeHealth, TradeExplanation } from '../../../shared/types/decision';
 import { MarketRegime, TrendDirection, MomentumLevel, MarketStructure } from '../../../shared/types/market';
 import { OverlayState, SignalLifecycleStage, ControlCenterState, DeveloperDiagnostics, AppSettings, DEFAULT_SETTINGS } from '../../../shared/types/ipc';
 import { IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
@@ -424,10 +424,15 @@ export class AnalysisController {
    * Derived 100% strictly from backend evidence.
    */
   public calculateTradeHealthScore(stabilized: any, observation?: any): number {
-    if (!this.activeSignal || this.activeSignal.invalidated) return 0;
+    const activeTrades = TradeLifecycleManager.getInstance().getActiveTrades();
+    const latestExecutedAction = activeTrades.length > 0
+      ? activeTrades[activeTrades.length - 1].direction
+      : null;
+    const signalAction = latestExecutedAction || this.activeSignal?.action || stabilized?.action;
+    if (signalAction !== TradingAction.BUY && signalAction !== TradingAction.SELL) return 0;
+    if (!latestExecutedAction && this.activeSignal?.invalidated) return 0;
 
-    const signalAction = this.activeSignal.action;
-    const currentAction = stabilized.action;
+    const currentAction = stabilized?.action || TradingAction.WAIT;
     let score = 100;
 
     // 1. Trend alignment (-30 if opposing, -15 if neutral)
@@ -481,23 +486,16 @@ export class AnalysisController {
       return TradeHealth.INVALID; // Terminal!
     }
 
-    // Immediate state degradation on evidence breakdown
+    // A single noisy frame must not permanently invalidate a placed trade.
+    // Degrade step-by-step; INVALID is reached only after sustained CRITICAL evidence.
     if (rawScore < 40) {
-      this.currentTradeHealth = TradeHealth.INVALID;
+      if (this.currentTradeHealth === TradeHealth.HEALTHY) {
+        this.currentTradeHealth = TradeHealth.WEAKENING;
+      } else if (this.currentTradeHealth === TradeHealth.WEAKENING) {
+        this.currentTradeHealth = TradeHealth.CRITICAL;
+      }
       this.healthyRecoveryScanCount = 0;
-      return TradeHealth.INVALID;
-    }
-
-    if (this.currentTradeHealth === TradeHealth.HEALTHY && rawScore < 60) {
-      this.currentTradeHealth = TradeHealth.WEAKENING;
-      this.healthyRecoveryScanCount = 0;
-      return TradeHealth.WEAKENING;
-    }
-
-    if (this.currentTradeHealth === TradeHealth.WEAKENING && rawScore < 40) {
-      this.currentTradeHealth = TradeHealth.CRITICAL;
-      this.healthyRecoveryScanCount = 0;
-      return TradeHealth.CRITICAL;
+      return this.currentTradeHealth;
     }
 
     if (this.currentTradeHealth === TradeHealth.HEALTHY && rawScore < 80) {
@@ -627,7 +625,8 @@ export class AnalysisController {
     const validTransitions: Record<TradeStatusState, TradeStatusState[]> = {
       'NO TRADE': ['ENTRY WINDOW', 'TRADE ACTIVE'],
       'ENTRY WINDOW': ['TRADE ACTIVE', 'TRADE INVALIDATED', 'NO TRADE'],
-      'TRADE ACTIVE': ['TRADE COMPLETED', 'TRADE INVALIDATED'],
+      'TRADE ACTIVE': ['RESULT PENDING', 'TRADE COMPLETED'],
+      'RESULT PENDING': ['TRADE COMPLETED', 'NO TRADE'],
       'TRADE INVALIDATED': ['NO TRADE'],
       'TRADE COMPLETED': ['NO TRADE'],
     };
@@ -768,16 +767,15 @@ export class AnalysisController {
       this.latestTradeExplanation = this.generateTradeExplanation(this.lastOverlayState || {}, observation);
 
       let status: 'STABLE' | 'DETERIORATING' | 'AGAINST_THESIS' = 'STABLE';
-      let proposedTradeStatus: TradeStatusState = remaining > 0 ? 'TRADE ACTIVE' : 'TRADE COMPLETED';
+      let proposedTradeStatus: TradeStatusState = remaining > 0 ? 'TRADE ACTIVE' : 'RESULT PENDING';
 
       if (deterioration === 'AGAINST_THESIS' || health === TradeHealth.INVALID) {
         status = 'AGAINST_THESIS';
-        proposedTradeStatus = 'TRADE INVALIDATED';
       } else if (remaining > 0 && (deterioration === 'DETERIORATING' || health === TradeHealth.CRITICAL || health === TradeHealth.WEAKENING)) {
         status = 'DETERIORATING';
         proposedTradeStatus = 'TRADE ACTIVE';
       } else if (remaining === 0) {
-        proposedTradeStatus = 'TRADE COMPLETED';
+        proposedTradeStatus = 'RESULT PENDING';
       }
 
       this.lastTradeStatusState = proposedTradeStatus;
@@ -982,7 +980,7 @@ export class AnalysisController {
 
     if (activeTrade) {
       const remaining = Math.max(0, Math.ceil((activeTrade.expiryTimestamp - now) / 1000));
-      effectiveTradeStatus = remaining > 0 ? 'TRADE ACTIVE' : 'TRADE COMPLETED';
+      effectiveTradeStatus = remaining > 0 ? 'TRADE ACTIVE' : 'RESULT PENDING';
       activeTradeContext = {
         signalId: activeTrade.signalId || `trade-${activeTrade.id}`,
         originalAction: activeTrade.direction,
@@ -1085,6 +1083,9 @@ export class AnalysisController {
     }
 
     const calHealth = CalibrationDatasetManager.getInstance().getCalibrationHealth();
+    const projectedConfidence = typeof stabilized.confidence === 'number'
+      ? this.smoothConfidence(this.normalizeConfidencePercent(stabilized.confidence), observation)
+      : stabilized.confidence;
 
     const overlayState: OverlayState = {
       systemStatus: SystemStatus.SCANNING,
@@ -1095,12 +1096,8 @@ export class AnalysisController {
       tradeStatus,
       tradeHealth: activeTradeContext ? activeTradeContext.tradeHealth : undefined,
       signalStrength: stabilized.signalStrength,
-      waitScore: typeof stabilized.confidence === 'number'
-        ? confidenceToWaitScore(this.normalizeConfidenceRatio(this.smoothConfidence(this.normalizeConfidencePercent(stabilized.confidence), observation)))
-        : confidenceToWaitScore(this.normalizeConfidenceRatio(stabilized.confidence)),
-      confidence: typeof stabilized.confidence === 'number'
-        ? this.smoothConfidence(this.normalizeConfidencePercent(stabilized.confidence), observation)
-        : stabilized.confidence,
+      waitScore: confidenceToWaitScore(this.normalizeConfidenceRatio(projectedConfidence)),
+      confidence: projectedConfidence,
       calibrationActive: calHealth.isReadyForCalibration,
       risk: stabilized.risk,
       reason: stabilized.reason,
@@ -1158,10 +1155,10 @@ export class AnalysisController {
   // ----------------------------------------------------------
 
   public getControlCenterState(): ControlCenterState {
-    const activeTradeCount = Math.max(
-      TradeLifecycleManager.getInstance().getActiveTrades().length,
-      this.tradeRepo ? this.tradeRepo.getActiveTradeCount() : 0
-    );
+    const now = Date.now();
+    const activeTradeCount = TradeLifecycleManager.getInstance().getActiveTrades()
+      .filter((trade) => trade.status === TradeState.TRADE_ACTIVE && trade.expiryTimestamp > now)
+      .length;
     return {
       analysisState: this.state,
       systemStatus: this.lastOverlayState?.systemStatus
@@ -1425,6 +1422,9 @@ export class AnalysisController {
     });
 
     if (!registeredTrade) return;
+    this.currentTradeHealth = TradeHealth.HEALTHY;
+    this.healthyRecoveryScanCount = 0;
+    this.consecutiveInvalidationScans = 0;
     const confirmedSignalId = registeredTrade.signalId || `trade-${registeredTrade.id}`;
 
     this.lastTradeStatusState = 'TRADE ACTIVE';

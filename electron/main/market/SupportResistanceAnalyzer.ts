@@ -7,9 +7,11 @@ export class SupportResistanceAnalyzer {
       return { levels: [], nearestSupport: null, nearestResistance: null };
     }
 
-    // Build synthetic swing points from candle extremes if swingPoints array is sparse
+    // Guarantee one visual high and one visual low when swing detection is sparse.
     const effectivePoints: SwingPoint[] = swingPoints ? [...swingPoints] : [];
-    if (effectivePoints.length === 0) {
+    const hasHigh = effectivePoints.some((point) => point.type === SwingType.HIGHER_HIGH || point.type === SwingType.LOWER_HIGH);
+    const hasLow = effectivePoints.some((point) => point.type === SwingType.HIGHER_LOW || point.type === SwingType.LOWER_LOW);
+    if (!hasHigh || !hasLow) {
       let minPrice = Infinity;
       let maxPrice = -Infinity;
       let minIdx = 0;
@@ -20,8 +22,8 @@ export class SupportResistanceAnalyzer {
         if (c.wickTopPx < minPrice) { minPrice = c.wickTopPx; minIdx = idx; }
       });
 
-      if (maxPrice !== -Infinity) effectivePoints.push({ index: maxIdx, pricePx: maxPrice, type: SwingType.LOWER_LOW });
-      if (minPrice !== Infinity) effectivePoints.push({ index: minIdx, pricePx: minPrice, type: SwingType.HIGHER_HIGH });
+      if (!hasLow && maxPrice !== -Infinity) effectivePoints.push({ index: maxIdx, pricePx: maxPrice, type: SwingType.LOWER_LOW });
+      if (!hasHigh && minPrice !== Infinity) effectivePoints.push({ index: minIdx, pricePx: minPrice, type: SwingType.HIGHER_HIGH });
     }
 
     const CLUSTER_THRESHOLD_PX = 12;
@@ -56,7 +58,7 @@ export class SupportResistanceAnalyzer {
 
     // Step 2: Evaluate current price and recent candles relative to levels
     const lastCandle = candles[candles.length - 1];
-    const currentPricePx = lastCandle.bodyBottomPx;
+    const currentPricePx = lastCandleClosePx(lastCandle);
 
     let nearestSupport: StructuralLevel | null = null;
     let nearestResistance: StructuralLevel | null = null;
@@ -106,9 +108,11 @@ export class SupportResistanceAnalyzer {
     const wickHigh = candle.wickTopPx;
     const dist = level.distancePts;
 
-    const touchesLevel = isSupport
-      ? (wickLow >= levelPx - 5 && lastCandleBottom(candle) <= levelPx + 15)
-      : (wickHigh <= levelPx + 5 && lastCandleTop(candle) >= levelPx - 15);
+    // Pixel Y grows downward. A hit requires the current wick to actually
+    // cross the level within a small visual tolerance; distance alone is not a hit.
+    const TOUCH_TOLERANCE_PX = 3;
+    const touchesLevel = wickHigh <= levelPx + TOUCH_TOLERANCE_PX
+      && wickLow >= levelPx - TOUCH_TOLERANCE_PX;
 
     if (touchesLevel) {
       if (candle.direction === (isSupport ? 'BULLISH' : 'BEARISH')) {
@@ -144,10 +148,8 @@ export class SupportResistanceAnalyzer {
   }
 }
 
-function lastCandleBottom(c: CandleObservation): number {
-  return Math.max(c.bodyTopPx, c.bodyBottomPx);
-}
-
-function lastCandleTop(c: CandleObservation): number {
-  return Math.min(c.bodyTopPx, c.bodyBottomPx);
+function lastCandleClosePx(c: CandleObservation): number {
+  if (c.direction === 'BULLISH') return Math.min(c.bodyTopPx, c.bodyBottomPx);
+  if (c.direction === 'BEARISH') return Math.max(c.bodyTopPx, c.bodyBottomPx);
+  return (c.bodyTopPx + c.bodyBottomPx) / 2;
 }

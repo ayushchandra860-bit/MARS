@@ -124,11 +124,17 @@ export class TradeLifecycleManager {
     this.pruneDeduplicationState(now);
     const executionId = trusted?.executionId ?? requestedExecutionId;
     const eventId = trusted?.eventId ?? params.eventId;
-    const asset = trusted ? trusted.asset : params.asset;
+    const trustedAsset = typeof trusted?.asset === 'string' && trusted.asset.trim() ? trusted.asset.trim() : null;
+    const fallbackAsset = typeof params.asset === 'string' && params.asset.trim() ? params.asset.trim() : null;
+    const asset = trustedAsset || fallbackAsset;
+    const hasMainProcessFeatureContext = Array.isArray(params.mlFeatures) && params.mlFeatures.length > 0;
     const contextMatchesEvidence = !trusted || Boolean(
-      trusted.asset
-      && this.assetKey(trusted.asset) === this.assetKey(params.asset)
-      && trusted.action === params.direction
+      trusted.action === params.direction
+      && (
+        trustedAsset
+          ? this.assetKey(trustedAsset) === this.assetKey(fallbackAsset)
+          : fallbackAsset && hasMainProcessFeatureContext
+      )
     );
     const signalId = contextMatchesEvidence
       ? params.signalId
@@ -164,9 +170,12 @@ export class TradeLifecycleManager {
     const tradeId = `trade-${params.sessionId.slice(0, 8)}-${signalPart}-${now}-${seq}`;
     const requestedExpiry = trusted?.expirySeconds ?? params.expirySeconds;
     const expirySec = requestedExpiry && requestedExpiry > 0 ? requestedExpiry : 60;
-    const entryPrice = trusted
-      ? trusted.entryPrice === null ? null : String(trusted.entryPrice)
-      : params.entryPrice ?? null;
+    const fallbackEntryPrice = typeof params.entryPrice === 'string' && params.entryPrice.trim()
+      ? params.entryPrice.trim()
+      : null;
+    const entryPrice = trusted?.entryPrice !== null && trusted?.entryPrice !== undefined
+      ? String(trusted.entryPrice)
+      : fallbackEntryPrice;
 
     const initialRecord: AuthoritativeTradeRecord = {
       id: tradeId,
@@ -187,7 +196,9 @@ export class TradeLifecycleManager {
       reasons: contextMatchesEvidence && params.reasons ? [...params.reasons] : [],
       timeframe: contextMatchesEvidence ? params.timeframe ?? null : null,
       regime: contextMatchesEvidence ? params.regime ?? null : null,
-      platformMode: trusted?.platformMode ?? params.platformMode ?? PlatformMode.UNKNOWN,
+      platformMode: trusted?.platformMode && trusted.platformMode !== PlatformMode.UNKNOWN
+        ? trusted.platformMode
+        : params.platformMode ?? trusted?.platformMode ?? PlatformMode.UNKNOWN,
       mlFeatures: contextMatchesEvidence && params.mlFeatures ? [...params.mlFeatures] : undefined,
     };
 

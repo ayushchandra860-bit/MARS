@@ -8,6 +8,7 @@ import React, { useState, useEffect } from 'react';
 import { invokeIpc, useIpcListener } from '../hooks/useIpc';
 import { IPC_INVOKE_CHANNELS, IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
 import { GlassPanel } from '../components/GlassPanel';
+import TradePipelineSummary from './TradePipelineSummary';
 import { formatConfidence } from '../../../shared/utils/formatters';
 
 export interface CalibrationHealth {
@@ -274,6 +275,8 @@ export default function JournalView() {
         </button>
       </div>
 
+      <TradePipelineSummary />
+
       {/* Calibration Dataset Readiness Banner */}
       <GlassPanel auroraBorder style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
@@ -351,7 +354,11 @@ export default function JournalView() {
         )}
       </div>
 
-      {/* Journal Table */}
+      <div style={{ fontSize: '11px', fontWeight: 800, color: 'var(--text-muted)', letterSpacing: '0.6px', margin: '4px 0 10px' }}>
+        ML-ELIGIBLE CALIBRATION SNAPSHOTS ONLY
+      </div>
+
+      {/* Strict calibration sample table; the complete execution ledger is above. */}
       <GlassPanel style={{ padding: 0 }}>
         {loading ? (
           <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>

@@ -43,10 +43,10 @@ describe('RC3 final performance and release contracts', () => {
     const pkg = JSON.parse(read('package.json'));
     const lock = JSON.parse(read('package-lock.json'));
     const workflow = read('.github/workflows/windows-installer.yml');
-    expect(pkg.version).toBe('3.0.1-rc.3');
+    expect(pkg.version).toBe('3.0.1-rc.4');
     expect(lock.version).toBe(pkg.version);
     expect(lock.packages[''].version).toBe(pkg.version);
-    expect(workflow).toContain('default: v3.0.1-rc.3');
+    expect(workflow).toContain('default: v3.0.1-rc.4');
     expect(workflow).toContain('Performance and reliability changes in rc.3');
   });
 });

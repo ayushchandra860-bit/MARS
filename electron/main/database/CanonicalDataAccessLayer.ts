@@ -52,10 +52,7 @@ export class CanonicalDataAccessLayer {
     if (!this.db) return [];
 
     try {
-      const conditions: string[] = [
-        "t.asset IS NOT NULL AND TRIM(t.asset) NOT IN ('', '▲', '▼', 'UNKNOWN')",
-        "(s.id IS NOT NULL OR t.signal_id LIKE 'manual-%' OR t.signal_id LIKE 'trade-%' OR t.signal_id LIKE 'signal-%')"
-      ];
+      const conditions: string[] = [];
       const params: any[] = [];
 
       if (query.sessionId) {
@@ -157,6 +154,7 @@ export class CanonicalDataAccessLayer {
           timestamp: r.entry_timestamp,
           asset: r.asset,
           platformMode: (r.platform_mode as PlatformMode) || null,
+          tradeStatus: r.status || null,
           timeframe: r.timeframe,
           rawDecision: (r.raw_decision as TradingAction) || (r.action as TradingAction),
           stabilizedDecision: (r.stabilized_decision as TradingAction) || (r.action as TradingAction),
@@ -220,11 +218,20 @@ export class CanonicalDataAccessLayer {
         ).all() as any[];
       }
 
-      // Active trade count
+      // "Active now" excludes expired rows that are awaiting a verified result.
+      const now = Date.now();
       const activeCountRow = this.db.prepare(
+        "SELECT COUNT(*) as count FROM tracked_trades WHERE status = 'ACTIVE' AND expiry_timestamp > ?"
+      ).get(now) as { count: number } | undefined;
+      const activeTradeCount = activeCountRow?.count ?? 0;
+      const unresolvedCountRow = this.db.prepare(
         "SELECT COUNT(*) as count FROM tracked_trades WHERE status IN ('ACTIVE', 'EXPIRING')"
       ).get() as { count: number } | undefined;
-      const activeTradeCount = activeCountRow?.count ?? 0;
+      const unresolvedTradeCount = unresolvedCountRow?.count ?? 0;
+      const registeredCountRow = this.db.prepare(
+        'SELECT COUNT(*) as count FROM tracked_trades'
+      ).get() as { count: number } | undefined;
+      const registeredTradeCount = registeredCountRow?.count ?? 0;
 
       // Calculate session / queried metrics
       let wins = 0;
@@ -346,8 +353,8 @@ export class CanonicalDataAccessLayer {
           totalTrades: total,
         };
 
-        // Eligible for best/worst ranking: at least 2 trades (or 1 if total completed is small)
-        if (total >= (totalCompleted >= 5 ? 2 : 1)) {
+        // Avoid declaring an asset "best" or "worst" from a tiny sample.
+        if (total >= 5) {
           eligibleAssets.push({ asset, winRate: wr, totalTrades: total });
         }
       }
@@ -377,10 +384,10 @@ export class CanonicalDataAccessLayer {
       const buyCount = signalCountsRow?.buy_count ?? 0;
       const sellCount = signalCountsRow?.sell_count ?? 0;
       const waitCount = signalCountsRow?.wait_count ?? 0;
-      const avgSignalStrength = signalCountsRow?.avg_strength ?? 0.7;
+      const avgSignalStrength = signalCountsRow?.avg_strength ?? 0;
 
       const avgConfidence: CanonicalConfidence = confidenceCount > 0 ? totalConfidenceSum / confidenceCount : null;
-      const avgTradeDurationSec = durationCount > 0 ? Math.round(totalDurationSec / durationCount) : 60;
+      const avgTradeDurationSec = durationCount > 0 ? Math.round(totalDurationSec / durationCount) : 0;
 
       return {
         totalCompleted,
@@ -391,6 +398,8 @@ export class CanonicalDataAccessLayer {
         allTimeLosses,
         allTimeWinRate,
         activeTradeCount,
+        registeredTradeCount,
+        unresolvedTradeCount,
         recentForm,
         overallWinRate: allTimeWinRate,
         todayWinRate,
@@ -447,6 +456,8 @@ export class CanonicalDataAccessLayer {
       allTimeLosses: 0,
       allTimeWinRate: 0,
       activeTradeCount: 0,
+      registeredTradeCount: 0,
+      unresolvedTradeCount: 0,
       recentForm: [],
       overallWinRate: 0,
       todayWinRate: 0,

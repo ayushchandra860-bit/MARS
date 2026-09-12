@@ -7,6 +7,7 @@
 
 import { Database } from '../database/Database';
 import { CanonicalDataAccessLayer } from '../database/CanonicalDataAccessLayer';
+import { CalibrationDatasetManager } from '../brain/CalibrationDatasetManager';
 import { PerformanceStats, HistoryEntry } from '../../../shared/types/ipc';
 import {
   CanonicalConfidence,
@@ -132,6 +133,7 @@ export class AnalyticsEngine {
 
   public setDatabase(db: Database): void {
     this.dal.setDatabase(db);
+    CalibrationDatasetManager.getInstance().setDatabase(db);
   }
 
   // ----------------------------------------------------------
@@ -182,7 +184,12 @@ export class AnalyticsEngine {
 
   public getComprehensiveReport(sessionId?: string): ComprehensiveAnalyticsReport {
     const entries = this.dal.getJournalEntries(sessionId ? { sessionId } : {});
-    const completed = entries.filter((e) => e.outcome === 'WIN' || e.outcome === 'LOSS' || e.outcome === 'DRAW');
+    const verifiedTradeIds = new Set(
+      CalibrationDatasetManager.getInstance().getCalibrationObservations()
+        .filter((snapshot) => !sessionId || snapshot.sessionId === sessionId)
+        .map((snapshot) => snapshot.tradeId),
+    );
+    const completed = entries.filter((entry) => verifiedTradeIds.has(entry.id));
 
     const totalTrades = completed.length;
     const wins = completed.filter((e) => e.outcome === 'WIN').length;

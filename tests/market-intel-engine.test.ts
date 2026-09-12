@@ -63,8 +63,8 @@ describe('MarketIntelEngine (Phase 3.7 Architecture)', () => {
     expect(run1.pressureSellPercent).toBeLessThan(50);
     expect(run1.trendStrength).toBe(85);
     expect(run1.trendStrengthStatus).toBe('CALCULATED');
-    expect(run1.support.display).toBe('18 PTS BELOW');
-    expect(run1.resistance.display).toBe('24 PTS ABOVE');
+    expect(run1.support.display).toBe('MID • VISUAL BELOW');
+    expect(run1.resistance.display).toBe('MID • VISUAL ABOVE');
     expect(run1.reversalRisk).toBe('VERY LOW');
     expect(run1.nextExpectation.primary).toBe('CONTINUATION LIKELY');
   });
