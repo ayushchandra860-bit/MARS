@@ -1,11 +1,12 @@
 import { PlatformMode } from '../../../shared/types/canonical';
 import { AuthoritativeTradeRecord } from '../../../shared/types/decision';
-import { BrowserTradeClickEvent } from './embeddedEventValidation';
+import { BrowserTradeClickEvent, parseDurationSeconds } from './embeddedEventValidation';
 
 export interface MarketSnapshotEvidence {
   asset: string | null;
   price: number | null;
   platformMode: PlatformMode | 'DEMO' | 'LIVE' | 'UNKNOWN';
+  tradeDuration?: string | null;
   observedAt: number;
 }
 
@@ -49,6 +50,7 @@ export function enrichBrowserTradeClick(
   const entryPrice = validPrice(click.entryPrice)
     ? click.entryPrice
     : validPrice(snapshot.price) ? snapshot.price : null;
+  const expirySeconds = click.expirySeconds ?? parseDurationSeconds(snapshot.tradeDuration);
   const snapshotMode = String(snapshot.platformMode);
   const platformMode: PlatformMode = click.platformMode !== PlatformMode.UNKNOWN
     ? click.platformMode
@@ -62,11 +64,13 @@ export function enrichBrowserTradeClick(
     ...click,
     asset,
     entryPrice,
+    expirySeconds,
     platformMode,
     nodeInfo: {
       ...click.nodeInfo,
       assetName: asset,
       entryPrice,
+      expirySeconds,
       platformMode,
     },
   };

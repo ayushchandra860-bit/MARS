@@ -175,8 +175,10 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
       : activeTrade.status === 'DETERIORATING' ? 'SETUP WEAKENING'
       : 'TRADE ACTIVE'
     : tradeStatus;
-  // All trades (manual or signal) are treated identically â€” no MANUAL label.
-  const primaryStatusLabel = hasRunningTrade ? tradeDirectionLabel : signalStatus;
+  // Analysis and execution are separate lanes: a manual click must never look like a MARS signal.
+  const isManualTrade = hasRunningTrade && activeTrade?.source === 'MANUAL';
+  const primaryStatusLabel = isManualTrade ? 'MANUAL TRADE TRACKING' : hasRunningTrade ? tradeDirectionLabel : signalStatus;
+  const tradeBadgeLabel = isManualTrade ? 'MANUAL TRADE' : tradeStatus === 'TRADE INVALIDATED' ? 'ENTRY INVALIDATED' : tradeStatus;
   const primaryStatusColor = primaryStatusLabel.includes('AGAINST') || primaryStatusLabel.includes('CONFLICT') || primaryStatusLabel.includes('INVALIDATED')
     ? 'var(--color-coral)'
     : primaryStatusLabel.includes('WEAKENING') || primaryStatusLabel.includes('WAIT')
@@ -271,7 +273,7 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
             color: tradeStatus === 'TRADE ACTIVE' ? 'var(--color-emerald)' : tradeStatus === 'ENTRY WINDOW' ? 'var(--accent-cyan)' : tradeStatus === 'TRADE INVALIDATED' ? 'var(--color-coral)' : 'var(--text-muted)',
             background: 'rgba(255,255,255,0.05)', letterSpacing: '0.5px',
           }}>
-            {tradeStatus === 'TRADE INVALIDATED' ? 'ENTRY INVALIDATED' : tradeStatus}
+            {tradeBadgeLabel}
           </span>
         </div>
       </div>

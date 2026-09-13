@@ -7,7 +7,7 @@ export interface TrustedExecutionEvidence {
   action: TradingAction.BUY | TradingAction.SELL;
   asset: string | null;
   entryPrice: number | null;
-  expirySeconds: number;
+  expirySeconds: number | null;
   platformMode: PlatformMode;
   capturedAt: number;
 }
@@ -52,7 +52,7 @@ export class TrustedExecutionEvidenceRegistry {
       entryPrice: Number.isFinite(price) && price > 0 ? price : null,
       expirySeconds: Number.isFinite(expiry) && expiry > 0
         ? Math.min(24 * 60 * 60, Math.round(expiry))
-        : 60,
+        : null,
       platformMode,
       capturedAt: Date.now(),
     });

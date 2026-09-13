@@ -40,15 +40,64 @@ export function buildEmbeddedTradeDetectorScript(): string {
       var multiplier = duration[2].startsWith('h') ? 3600 : duration[2].startsWith('m') ? 60 : 1;
       return Math.min(86400, Math.max(1, Math.round(Number(duration[1]) * multiplier)));
     }
-    return 60;
+    return null;
   }
   function detectAsset(root) {
     var value = firstText('[data-test="asset-select-button"], [data-test="asset-name"], [data-qa*="asset"], [data-testid*="asset"], [aria-label*="asset" i], .asset-select__name, .asset-name, [class*="assetName"], [class*="asset-title"]', root);
     if (!value && document.title) value = document.title.replace(/^[0-9.,\\s▲▼\\u25B2\\u25BC\\u2191\\u2193$€₹£]+/, '').split('|')[0];
     return cleanAsset(value);
   }
-  function detectExpiry(root) {
-    return firstText('[data-test="expiration-input"], [data-test="expiry-time"], [data-test*="duration"], [data-test*="expiry"], input[name="expiry"], input[name="duration"], .expiration-select, [class*="deal-duration"], [class*="duration-input"], [class*="duration-value"]', root);
+  function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+  function normalizeDurationText(value) {
+    var text = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!text || text.length > 32) return '';
+    var unit = text.match(/^(\d{1,3}(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)$/);
+    if (unit) return text;
+    if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) return text;
+    return '';
+  }
+  function findDurationNearLabel(root, labelPattern) {
+    try {
+      var labels = (root || document).querySelectorAll('label, div, span, p');
+      var labelLimit = Math.min(labels.length, 1500);
+      var best = '';
+      var bestScore = -1;
+      for (var i = 0; i < labelLimit; i++) {
+        var label = labels[i];
+        if (!isVisible(label)) continue;
+        var labelText = textOf(label).replace(/\s+/g, ' ').trim();
+        if (!labelPattern.test(labelText)) continue;
+        var scope = label.parentElement;
+        for (var depth = 0; scope && depth < 3; depth++, scope = scope.parentElement) {
+          var candidates = scope.querySelectorAll('input, button, [role="button"], [role="spinbutton"], div, span');
+          var candidateLimit = Math.min(candidates.length, 240);
+          for (var n = 0; n < candidateLimit; n++) {
+            var candidate = candidates[n];
+            if (candidate === label || !isVisible(candidate)) continue;
+            var normalized = normalizeDurationText(textOf(candidate));
+            if (!normalized) continue;
+            var hasUnit = /[a-z]/i.test(normalized);
+            var score = (hasUnit ? 20 : 5) - depth;
+            if (candidate.tagName === 'INPUT' || candidate.tagName === 'BUTTON') score += 2;
+            if (score > bestScore) { best = normalized; bestScore = score; }
+          }
+          if (bestScore >= 20) return best;
+        }
+      }
+      return best;
+    } catch (_) { return ''; }
+  }
+  function detectTradeDuration(root) {
+    var direct = firstText('[data-test="expiration-input"], [data-test="expiry-time"], [data-test*="duration"], [data-test*="expiry"], input[name="expiry"], input[name="duration"], .expiration-select, [class*="deal-duration"], [class*="duration-input"], [class*="duration-value"]', root);
+    return normalizeDurationText(direct) || findDurationNearLabel(root, /^(duration|expiry|expiration)$/i);
+  }
+  function detectChartTimeframe(root) {
+    var direct = firstText('[data-test*="timeframe"], [data-test*="chart-interval"], [data-qa*="timeframe"], [data-testid*="timeframe"], [aria-label*="timeframe" i], [aria-label*="chart interval" i], [class*="timeframe"], [class*="chart-interval"]', root);
+    return normalizeDurationText(direct) || findDurationNearLabel(root, /^(chart\s*)?(timeframe|interval)$/i);
   }
   function detectPrice(root) {
     var selectors = '[data-test="current-price"], [data-test="current-quote"], [data-test*="asset-price"], [data-qa*="current-price"], [data-testid*="current-price"], [class*="current-price"], [class*="currentPrice"]';
@@ -74,6 +123,21 @@ export function buildEmbeddedTradeDetectorScript(): string {
 
   var lastMarketKey = '';
   var lastMarketEmitAt = 0;
+  var lastContextReadAt = 0;
+  var cachedMarketContext = { chartTimeframe: '', tradeDuration: '', platformMode: 'UNKNOWN' };
+  function readMarketContext(now, force) {
+    if (force || now - lastContextReadAt >= 1000) {
+      var chartTimeframe = detectChartTimeframe(document);
+      var tradeDuration = detectTradeDuration(document);
+      cachedMarketContext = {
+        chartTimeframe: chartTimeframe,
+        tradeDuration: tradeDuration,
+        platformMode: detectPlatformMode()
+      };
+      lastContextReadAt = now;
+    }
+    return cachedMarketContext;
+  }
   function emitMarketSnapshot(force) {
     try {
       var now = Date.now();
@@ -81,10 +145,14 @@ export function buildEmbeddedTradeDetectorScript(): string {
       if (!force && now - lastMarketEmitAt < minInterval) return;
       var asset = detectAsset(document);
       var price = detectPrice(document);
-      var timeframe = detectExpiry(document);
-      var platformMode = detectPlatformMode();
+      var context = readMarketContext(now, force);
+      var chartTimeframe = context.chartTimeframe;
+      var tradeDuration = context.tradeDuration;
+      var timeframe = chartTimeframe || tradeDuration;
+      var timeframeSource = chartTimeframe ? 'CHART_TIMEFRAME' : tradeDuration ? 'TRADE_DURATION' : 'NONE';
+      var platformMode = context.platformMode;
       if (!asset && price === null) return;
-      var key = [asset, price, timeframe, platformMode].join('|');
+      var key = [asset, price, timeframe, timeframeSource, platformMode].join('|');
       if (!force && key === lastMarketKey && now - lastMarketEmitAt < 1000) return;
       lastMarketKey = key;
       lastMarketEmitAt = now;
@@ -92,6 +160,9 @@ export function buildEmbeddedTradeDetectorScript(): string {
         asset: asset || null,
         price: price,
         timeframe: timeframe || null,
+        chartTimeframe: chartTimeframe || null,
+        tradeDuration: tradeDuration || null,
+        timeframeSource: timeframeSource,
         platformMode: platformMode,
         title: String(document.title || '').slice(0, 300),
         observedAt: now
@@ -125,7 +196,7 @@ export function buildEmbeddedTradeDetectorScript(): string {
       var now = Date.now();
       var executionId = makeId();
       var asset = detectAsset(document);
-      var expiryText = detectExpiry(document);
+      var expiryText = detectTradeDuration(document);
       var expirySeconds = parseExpiry(expiryText);
       var entryPrice = detectPrice(document);
       var platformMode = detectPlatformMode();

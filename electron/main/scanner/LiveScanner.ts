@@ -79,6 +79,9 @@ export class LiveScanner {
       const normalizedSnapshotTimeframe = snapshot?.timeframe
         ? this.ocrService.extractTimeframeFromText(snapshot.timeframe)
         : null;
+      const snapshotMode = snapshot?.platformMode && snapshot.platformMode !== PlatformMode.UNKNOWN
+        ? snapshot.platformMode as PlatformMode
+        : null;
 
       const now = Date.now();
       const quoteObservedAt = snapshot?.observedAt ?? now;
@@ -113,6 +116,7 @@ export class LiveScanner {
           now,
           quoteObservedAt,
           normalizedSnapshotTimeframe,
+          snapshotMode || this.ocrService.extractPlatformMode(sourceTitle),
         );
       }
 
@@ -183,7 +187,7 @@ export class LiveScanner {
         timestamp,
         asset: cleanAsset,
         assetIdentity: ocrResults?.assetIdentity || normalizeAsset(cleanAsset, timestamp),
-        platformMode: snapshot?.platformMode as PlatformMode || ocrResults?.platformMode || this.ocrService.extractPlatformMode(sourceTitle || sourceText),
+        platformMode: snapshotMode || ocrResults?.platformMode || this.ocrService.extractPlatformMode(sourceTitle || sourceText),
         freshness: computeFreshness(timestamp, Date.now()),
         source: snapshot?.price !== null && snapshot?.price !== undefined
           ? DataSource.DOM_BODY
@@ -316,10 +320,10 @@ export class LiveScanner {
     now: number,
     observedAt: number,
     timeframe: string | null,
+    platformMode: PlatformMode,
   ): ScanResult {
     const assetIdentity = this.ocrService.extractAssetIdentityFromTitle(sourceTitle || asset) || normalizeAsset(asset, observedAt);
     this.ocrService.extractPriceFromText(`Price: ${price}`);
-    const platformMode = this.ocrService.extractPlatformMode(sourceTitle);
     const cache = this.candleCache!;
     const cacheAge = Math.max(0, now - cache.capturedAt);
     const cacheDegraded = cacheAge > LiveScanner.CANDLE_CACHE_MAX_AGE_MS;
