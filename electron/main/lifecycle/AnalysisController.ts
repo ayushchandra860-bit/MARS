@@ -36,7 +36,7 @@ import { MarketIntelEngine } from '../market/MarketIntelEngine';
 import { CalibrationDatasetManager } from '../brain/CalibrationDatasetManager';
 import { MLEngine } from '../decision/MLEngine';
 import { TradeLifecycleManager } from '../trade/TradeLifecycleManager';
-import { isValidAssetName, AnalysisMode } from '../../../shared/types/canonical';
+import { isValidAssetName, AnalysisMode, QualityGateRejection } from '../../../shared/types/canonical';
 import { formatConfidence, formatRisk } from '../../../shared/utils/formatters';
 
 export class AnalysisController {
@@ -307,17 +307,37 @@ export class AnalysisController {
 
       const qualityCheck = this.qualityGate.evaluate(scanResultObservation, true);
       if (!qualityCheck.passed) {
-        // A rejected observation cannot create a signal, but existing trades
-        // still need expiry processing and the UI must show a real WAIT state.
+        // A rejected observation cannot create a signal, but expected chart warm-up
+        // is a safe WAIT state rather than an application failure.
         this.updateTradeLifecycle(scanResultObservation);
+        const rejection = qualityCheck.rejection || QualityGateRejection.LOW_DATA_QUALITY;
+        const detail = qualityCheck.detail || qualityCheck.reason || 'Quality gate rejected the observation';
+        const warming = rejection === QualityGateRejection.INSUFFICIENT_CANDLES
+          || rejection === QualityGateRejection.LOW_CANDLE_QUALITY
+          || rejection === QualityGateRejection.LOW_DATA_QUALITY;
+        scanResult.diagnosticsTracker?.recordStage(
+          ScannerStage.QUALITY_GATE,
+          StageStatus.FAIL,
+          `${rejection}: ${detail}`,
+        );
+        if (scanResult.diagnosticsTracker) {
+          this.latestDiagnosticsReport = scanResult.diagnosticsTracker.generateReport();
+        }
         this.emitPipelineStatus(
-          SystemStatus.DEGRADED,
-          `Live data warming or rejected: ${qualityCheck.reason || 'quality gate failed'}.`,
+          warming ? SystemStatus.SCANNING : SystemStatus.DEGRADED,
+          `WAIT • ${rejection}: ${detail}`,
           scanResultObservation,
         );
         return;
       }
-
+      scanResult.diagnosticsTracker?.recordStage(
+        ScannerStage.QUALITY_GATE,
+        StageStatus.PASS,
+        qualityCheck.detail || 'Observation passed the quality gate',
+      );
+      if (scanResult.diagnosticsTracker) {
+        this.latestDiagnosticsReport = scanResult.diagnosticsTracker.generateReport();
+      }
       const features = this.featureExtractor.extract(scanResultObservation);
       const observationWithFeatures = { ...scanResultObservation, ...features };
       this.lastObservationWithFeatures = observationWithFeatures;
