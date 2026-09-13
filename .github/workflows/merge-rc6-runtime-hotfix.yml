@@ -28,6 +28,7 @@ jobs:
       - name: Apply exact RC6 source files and verify
         shell: bash
         run: |
+          # Direct merge explicitly approved by the repository owner.
           log="$RUNNER_TEMP/rc6-main-merge.log"
           set +e
           git fetch origin fix/runtime-scanner-warmup-rc6
