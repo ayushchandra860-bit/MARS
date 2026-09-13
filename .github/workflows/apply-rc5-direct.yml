@@ -44,6 +44,7 @@ jobs:
             git add -f .github/rc5-text/direct-error.txt
             git commit -m "ci: capture exact RC5 patch error"
           else
+            git checkout -- .github/workflows/windows-installer.yml
             cp "$log" .github/rc5-text/direct-success.txt
             printf '\nstatus=0 run=%s\n' "$GITHUB_RUN_ID" >> .github/rc5-text/direct-success.txt
             git add -A
