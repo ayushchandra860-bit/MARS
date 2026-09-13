@@ -12,6 +12,7 @@ coverage/
 *.db
 *.db-shm
 *.db-wal
+*.db.bak
 *.log
 logs/
 

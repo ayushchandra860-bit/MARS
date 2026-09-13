@@ -90,10 +90,10 @@ export class SignalStabilizer {
         reason: fallbackReason,
         reasons: [fallbackReason],
         signalStrength: 0,
-        confidence: 0,
-        risk: RiskLevel.LOW,
+        confidence: null,
+        risk: null,
         marketBias: MarketBias.NEUTRAL,
-        recommendedExpiry: '1 min',
+        recommendedExpiry: null,
         dataQuality: QualityLevel.FAILED,
         timestamp: Date.now(),
         wasStabilized: false,
@@ -119,7 +119,21 @@ export class SignalStabilizer {
       this.transitionCount = 0;
     }
 
-    // Very high strength signals bypass hysteresis
+    // WAIT is a first-class safety decision and is never delayed.
+    if (String(raw.action) === TradingAction.WAIT) {
+      if (this.lastAction !== TradingAction.WAIT) this.lastTransitionTimestamp = now;
+      this.lastAction = TradingAction.WAIT;
+      this.pendingAction = TradingAction.WAIT;
+      this.pendingCount = 0;
+      this.lastStableDecision = raw;
+      this.lastConfirmedAction = TradingAction.WAIT;
+      this.lastConfirmedTimestamp = 0;
+      this.confirmedSignalTimestamp = 0;
+      this.currentLifecycle = SignalLifecycle.WATCHING;
+      return { ...raw, reasons, wasStabilized: false, frameConsistency: this.getFrameConsistency() };
+    }
+
+    // Very high strength directional signals bypass hysteresis
     if (raw.signalStrength >= this.highStrengthThreshold()) {
       this.lastAction = raw.action;
       this.pendingAction = raw.action;

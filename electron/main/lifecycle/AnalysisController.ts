@@ -468,11 +468,12 @@ export class AnalysisController {
       score -= 5;
     }
 
-    // 5. Evidence agreement (-15 if agreementScore < 0.35)
-    const agreement = observation?.evidenceBreakdown?.agreementScore ?? 0.0;
-    if (agreement < 0.35) {
-      score -= 15;
-    }
+    const liveEvidence = observation
+      ? this.decisionEngine.getEvidenceEngine().evaluate(observation)
+      : null;
+    const agreement = liveEvidence?.agreementScore ?? null;
+    if (agreement !== null && agreement < 0.35) score -= 15;
+    else if (agreement === null) score -= 5;
 
     return Math.max(0, Math.min(100, score));
   }
@@ -582,30 +583,27 @@ export class AnalysisController {
   }
 
   private getLatestObservedPrice(observation?: any): number | null {
-    const candidates = [
-      observation?.currentPrice,
-      this.lastOverlayState?.currentPrice,
-    ];
-
-    for (const candidate of candidates) {
-      const numeric = typeof candidate === 'number' ? candidate : Number(String(candidate || '').replace(/,/g, ''));
-      if (Number.isFinite(numeric) && numeric > 0) return numeric;
-    }
-
-    return null;
+    const observedAt = typeof observation?.timestamp === 'number' ? observation.timestamp : 0;
+    if (!observedAt || Date.now() - observedAt > 5000 || observedAt - Date.now() > 1000) return null;
+    const candidate = observation?.currentPrice;
+    const numeric = typeof candidate === 'number' ? candidate : Number(String(candidate || '').replace(/,/g, ''));
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
   }
 
   /**
    * Regression Fix 6: Backend-only TradeExplanation object
    */
   public generateTradeExplanation(stabilized: any, observation?: any): TradeExplanation {
+    const sr = observation?.supportResistanceEvidence;
+    const visual = (level: any, side: string): string =>
+      level ? `${level.interactionState || 'DETECTED'} • VISUAL ${side}` : 'UNAVAILABLE';
     return {
-      trend: observation?.trendEvidence?.direction || 'NEUTRAL',
-      momentum: observation?.momentumEvidence?.level || 'MODERATE',
+      trend: observation?.trendEvidence?.direction || 'UNAVAILABLE',
+      momentum: observation?.momentumEvidence?.level || 'UNAVAILABLE',
       structure: observation?.structureEvidence?.structure || 'INSUFFICIENT_DATA',
-      risk: stabilized.risk,
-      support: observation?.supportLevel ? `${observation.supportLevel.distancePts} PTS BELOW` : 'UNKNOWN',
-      resistance: observation?.resistanceLevel ? `${observation.resistanceLevel.distancePts} PTS ABOVE` : 'UNKNOWN',
+      risk: stabilized?.risk || 'UNASSESSED',
+      support: visual(sr?.nearestSupport, 'BELOW'),
+      resistance: visual(sr?.nearestResistance, 'ABOVE'),
     };
   }
 
@@ -739,7 +737,7 @@ export class AnalysisController {
       confidence: this.activeSignal.originalConfidence ?? null,
       entryPrice: entryPrice.toString(),
       reasons: this.activeSignal.originalReasons,
-      timeframe: observation?.timeframe || '1m',
+      timeframe: observation?.timeframe || null,
       regime: this.activeSignal.regime,
       mlFeatures: MLEngine.getInstance().extractFeatures(observation || {}),
     });
@@ -763,7 +761,7 @@ export class AnalysisController {
 
     if (activeTrade) {
       const remaining = Math.max(0, Math.ceil((activeTrade.expiryTimestamp - now) / 1000));
-      const health = this.evaluateTradeHealth({ action: activeTrade.direction }, observation);
+      const health = this.currentTradeHealth;
       this.latestTradeExplanation = this.generateTradeExplanation(this.lastOverlayState || {}, observation);
 
       let status: 'STABLE' | 'DETERIORATING' | 'AGAINST_THESIS' = 'STABLE';
@@ -799,10 +797,7 @@ export class AnalysisController {
       return null;
     }
 
-    const health = this.evaluateTradeHealth(
-      this.lastOverlayState?.decision ? { action: this.lastOverlayState.decision } : { action: this.activeSignal.action },
-      observation
-    );
+    const health = this.currentTradeHealth;
     this.latestTradeExplanation = this.generateTradeExplanation(this.lastOverlayState || {}, observation);
 
     let status: 'STABLE' | 'DETERIORATING' | 'AGAINST_THESIS' = 'STABLE';
@@ -1028,11 +1023,12 @@ export class AnalysisController {
       supportLevel: observation?.supportResistanceEvidence?.nearestSupport || null,
       resistanceLevel: observation?.supportResistanceEvidence?.nearestResistance || null,
       marketIntelState: intel,
-      asset: observation?.asset || this.lastOverlayState?.asset || null,
-      timeframe: observation?.timeframe || this.lastOverlayState?.timeframe || null,
+      asset: observation?.asset || activeTrade?.asset || null,
+      timeframe: observation?.timeframe || activeTrade?.timeframe || null,
       currentPrice: typeof observation?.currentPrice === 'number'
+        && Number.isFinite(observation.currentPrice) && observation.currentPrice > 0
         ? String(observation.currentPrice)
-        : this.lastOverlayState?.currentPrice || null,
+        : null,
       lastUpdate: now,
       soundEnabled: this.currentSettings.soundEnabled,
     };
@@ -1366,7 +1362,7 @@ export class AnalysisController {
     const nodeInfo = event.nodeInfo || {};
     let asset = activeSignalMatches
       ? this.activeSignal!.asset
-      : (nodeInfo.asset || nodeInfo.assetName || this.lastOverlayState?.asset || null);
+      : ((event as any).asset || nodeInfo.asset || nodeInfo.assetName || null);
 
     if (!this.isValidAssetName(asset)) {
       const activeTitle = EmbeddedBrowserManager.getInstance().getActiveTitle();
@@ -1382,10 +1378,10 @@ export class AnalysisController {
     }
 
     const priceCandidates = [
-      this.getLatestObservedPrice(this.lastObservationWithFeatures),
+      (event as any).entryPrice,
       nodeInfo.entryPrice,
       nodeInfo.price,
-      this.lastOverlayState?.currentPrice,
+      this.getLatestObservedPrice(this.lastObservationWithFeatures),
     ];
     let entryPrice: number | null = null;
     for (const cand of priceCandidates) {
@@ -1412,7 +1408,7 @@ export class AnalysisController {
       platformMode: (event as any).platformMode,
       direction: event.action,
       asset,
-      timeframe: this.lastObservationWithFeatures?.timeframe || '1m',
+      timeframe: this.lastObservationWithFeatures?.timeframe || null,
       expirySeconds,
       confidence: activeSignalMatches ? this.activeSignal!.originalConfidence : null,
       regime: activeSignalMatches ? this.activeSignal!.regime : (this.lastObservationWithFeatures?.marketRegime || null),

@@ -27,12 +27,15 @@ import {
   AnalysisMode,
   CanonicalConfidence,
   CanonicalRisk,
+  DataFreshness,
+  computeFreshness,
   fromLegacyMode,
 } from '../../../shared/types/canonical';
 import { EvidenceEngine } from './EvidenceEngine';
 import { RiskEngine } from './RiskEngine';
 import { ExpiryEngine } from './ExpiryEngine';
 import { MarketRegimeAnalyzer } from '../market/MarketRegimeAnalyzer';
+import { DataQualityGate } from '../market/DataQualityGate';
 
 export interface CalibrationProfile {
   minThreshold: number;
@@ -124,6 +127,24 @@ export class DecisionEngine {
         timestamp,
         obs?.observationId,
       );
+    }
+
+    const freshness = obs.freshness ?? computeFreshness(obs.timestamp);
+    if (freshness !== DataFreshness.FRESH) {
+      return this.wait(WaitReason.DATA_STALE, 0, null, RiskLevel.HIGH, MarketBias.NEUTRAL,
+        null, obs.dataQuality, timestamp, obs.observationId);
+    }
+    if (!DataQualityGate.isSupportedTimeframe(obs.timeframe)) {
+      return this.wait(WaitReason.TIMEFRAME_UNAVAILABLE, 0, null, RiskLevel.HIGH, MarketBias.NEUTRAL,
+        null, obs.dataQuality, timestamp, obs.observationId);
+    }
+    if (typeof obs.currentPrice !== 'number' || !Number.isFinite(obs.currentPrice) || obs.currentPrice <= 0) {
+      return this.wait(WaitReason.PRICE_UNAVAILABLE, 0, null, RiskLevel.HIGH, MarketBias.NEUTRAL,
+        null, obs.dataQuality, timestamp, obs.observationId);
+    }
+    if (obs.dataQuality === QualityLevel.LOW || obs.dataQuality === QualityLevel.FAILED) {
+      return this.wait(WaitReason.DATA_NOT_READY, 0, null, RiskLevel.HIGH, MarketBias.NEUTRAL,
+        null, obs.dataQuality, timestamp, obs.observationId);
     }
 
     const trend = obs.trendEvidence?.direction || TrendDirection.NEUTRAL;

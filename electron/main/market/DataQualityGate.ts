@@ -27,6 +27,11 @@ export class DataQualityGate {
   public static readonly MIN_AVG_CANDLE_QUALITY = 0.65;
   public static readonly MAX_OBSERVATION_AGE_MS = FRESHNESS_THRESHOLDS.STALE_MAX_AGE_MS;
 
+  public static isSupportedTimeframe(value: string | null | undefined): value is string {
+    if (typeof value !== 'string') return false;
+    return /^(?:[1-9]\d*)\s*(?:s|sec|second|seconds|m|min|minute|minutes|h|hour|hours|d|day|days)$/i.test(value.trim());
+  }
+
   /** Demo data is isolated by default; callers must explicitly opt in. */
   public evaluate(obs: MarketObservation, allowDemo: boolean = false): QualityGateEvaluationResult {
     if (!obs) {
@@ -53,6 +58,17 @@ export class DataQualityGate {
     }
 
     const freshness = obs.freshness ?? computeFreshness(obs.timestamp);
+    if (freshness === DataFreshness.STALE) {
+      return {
+        passed: false,
+        reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
+        rejection: QualityGateRejection.STALE_DATA,
+        detail: `Observation is stale (${Date.now() - obs.timestamp}ms old); WAIT for a fresh quote`,
+        freshness,
+        platformMode,
+      };
+    }
+
     if (freshness === DataFreshness.EXPIRED) {
       return {
         passed: false,
@@ -75,6 +91,17 @@ export class DataQualityGate {
       };
     }
 
+    if (!DataQualityGate.isSupportedTimeframe(obs.timeframe)) {
+      return {
+        passed: false,
+        reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
+        rejection: QualityGateRejection.INVALID_TIMEFRAME,
+        detail: `Timeframe '${obs.timeframe}' is unavailable or unsupported; BUY/SELL is blocked`,
+        freshness,
+        platformMode,
+      };
+    }
+
     if (!obs.candles || obs.candles.length < DataQualityGate.MIN_CANDLES_FOR_SIGNAL) {
       return {
         passed: false,
@@ -86,29 +113,30 @@ export class DataQualityGate {
       };
     }
 
-    if (obs.candleQuality === QualityLevel.FAILED) {
+    if (obs.candleQuality === QualityLevel.FAILED || obs.candleQuality === QualityLevel.LOW) {
       return {
         passed: false,
         reason: FailureReasonCode.CANDLE_DETECTION_FAILED,
         rejection: QualityGateRejection.LOW_CANDLE_QUALITY,
-        detail: 'Candle quality assessment marked as FAILED',
+        detail: `Candle quality is ${obs.candleQuality}; WAIT for a cleaner chart`,
         freshness,
         platformMode,
       };
     }
 
-    if (obs.dataQuality === QualityLevel.FAILED) {
+    if (obs.dataQuality === QualityLevel.FAILED || obs.dataQuality === QualityLevel.LOW) {
       return {
         passed: false,
         reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
         rejection: QualityGateRejection.LOW_DATA_QUALITY,
-        detail: 'Overall data quality marked as FAILED',
+        detail: `Overall data quality is ${obs.dataQuality}; actionable output is blocked`,
         freshness,
         platformMode,
       };
     }
 
-    if (obs.captureQuality === QualityLevel.FAILED || obs.chartQuality === QualityLevel.FAILED) {
+    if (obs.captureQuality === QualityLevel.FAILED || obs.captureQuality === QualityLevel.LOW
+      || obs.chartQuality === QualityLevel.FAILED || obs.chartQuality === QualityLevel.LOW) {
       return {
         passed: false,
         reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
@@ -133,13 +161,14 @@ export class DataQualityGate {
       };
     }
 
-    if (obs.currentPrice !== null && obs.currentPrice !== undefined
-      && (!Number.isFinite(obs.currentPrice) || obs.currentPrice <= 0)) {
+    if (typeof obs.currentPrice !== 'number'
+      || !Number.isFinite(obs.currentPrice)
+      || obs.currentPrice <= 0) {
       return {
         passed: false,
         reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
         rejection: QualityGateRejection.INVALID_PRICE,
-        detail: `Invalid price quote: ${obs.currentPrice}`,
+        detail: `Current live quote is unavailable or invalid: ${obs.currentPrice}`,
         freshness,
         platformMode,
       };

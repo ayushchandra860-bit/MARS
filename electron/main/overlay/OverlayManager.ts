@@ -129,7 +129,18 @@ export class OverlayManager {
     platformMode: 'DEMO' | 'LIVE' | 'UNKNOWN';
     observedAt: number;
   }): void {
-    if (!snapshot || Date.now() - snapshot.observedAt > 5000) return;
+    if (!snapshot) return;
+    if (Date.now() - snapshot.observedAt > 5000) {
+      const priorMonitor = this.latestPayload?.tradeMonitor;
+      const stalePatch: Record<string, any> = { currentPrice: null, lastUpdate: snapshot.observedAt };
+      if (priorMonitor) stalePatch.tradeMonitor = {
+        ...priorMonitor, currentPrice: null, pnlPoints: null, pnlPct: null,
+        health: 'QUOTE UNAVAILABLE', healthReason: 'Live quote is stale; indicative P&L is paused.',
+      };
+      this.latestPayload = { ...(this.latestPayload || {}), ...stalePatch };
+      this.sendPayload(stalePatch);
+      return;
+    }
     const numericPrice = typeof snapshot.price === 'number' && Number.isFinite(snapshot.price) && snapshot.price > 0
       ? snapshot.price
       : null;
@@ -137,10 +148,10 @@ export class OverlayManager {
     const patch: Record<string, any> = {
       lastUpdate: snapshot.observedAt,
       platformMode: snapshot.platformMode,
+      currentPrice: nextPrice,
     };
     if (snapshot.asset) patch.asset = snapshot.asset;
     if (snapshot.timeframe) patch.timeframe = snapshot.timeframe;
-    if (nextPrice !== null) patch.currentPrice = nextPrice;
 
     const priorMonitor = this.latestPayload?.tradeMonitor;
     if (numericPrice !== null && priorMonitor) {
@@ -160,9 +171,14 @@ export class OverlayManager {
         health,
         healthReason: 'Indicative live quote only; final result remains evidence-verified.',
       };
+    } else if (priorMonitor) {
+      patch.tradeMonitor = {
+        ...priorMonitor, currentPrice: null, pnlPoints: null, pnlPct: null,
+        health: 'QUOTE UNAVAILABLE', healthReason: 'Live quote unavailable; indicative P&L is paused.',
+      };
     }
 
-    const quoteKey = [patch.asset || this.latestPayload?.asset || '', patch.currentPrice || this.latestPayload?.currentPrice || '', patch.timeframe || '', patch.platformMode || ''].join('|');
+    const quoteKey = [patch.asset || this.latestPayload?.asset || '', patch.currentPrice ?? '', patch.timeframe || '', patch.platformMode || ''].join('|');
     if (quoteKey === this.latestPayload?.__quoteKey && snapshot.observedAt - this.latestQuoteAt < 900) return;
     this.latestQuoteAt = snapshot.observedAt;
     this.quoteUpdateCount++;
@@ -181,12 +197,13 @@ export class OverlayManager {
       ? value
       : value && typeof value.value === 'string' ? value.value : null;
 
+    const hasLivePrice = !!livePayload && Object.prototype.hasOwnProperty.call(livePayload, 'currentPrice');
     const unified = {
       ...state,
       ...(livePayload || {}),
       asset: normalizeAsset(livePayload?.asset) || normalizeAsset(state.asset),
       timeframe: normalizeTimeframe(livePayload?.timeframe) || normalizeTimeframe(state.timeframe),
-      currentPrice: livePayload?.currentPrice ?? state.currentPrice ?? null,
+      currentPrice: hasLivePrice ? livePayload.currentPrice : state.currentPrice ?? null,
       support: livePayload?.support ?? state.supportLevel ?? null,
       supportLevel: state.supportLevel ?? livePayload?.support ?? null,
       resistance: livePayload?.resistance ?? state.resistanceLevel ?? null,
@@ -210,7 +227,7 @@ export class OverlayManager {
       soundAlertType: livePayload?.soundAlertType || null,
       systemStatus: state.systemStatus || 'READY',
       analysisState: state.analysisState || 'RUNNING',
-      lastUpdate: Date.now(),
+      lastUpdate: state.lastUpdate ?? livePayload?.lastUpdate ?? Date.now(),
     };
 
     const trade = unified.activeTradeContext;

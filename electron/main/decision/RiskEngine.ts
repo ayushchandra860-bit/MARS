@@ -7,7 +7,7 @@
 import { MarketObservation } from '../../../shared/types/observation';
 import { EvidenceBreakdown, RiskLevel } from '../../../shared/types/decision';
 import { CanonicalRisk } from '../../../shared/types/canonical';
-import { QualityLevel } from '../../../shared/types/scanner';
+import { CandleDirection, QualityLevel } from '../../../shared/types/scanner';
 import { VolatilityLevel, TrendDirection, MarketRegime } from '../../../shared/types/market';
 
 export class RiskEngine {
@@ -68,8 +68,13 @@ export class RiskEngine {
     // 5. Support/Resistance Conflict (Symmetric for Bullish & Bearish)
     if (observation.trendEvidence && observation.supportResistanceEvidence) {
       const { nearestSupport, nearestResistance } = observation.supportResistanceEvidence;
-      const currentPricePx = observation.candles && observation.candles.length > 0
-        ? observation.candles[observation.candles.length - 1].bodyBottomPx
+      const latestCandle = observation.candles.at(-1) || null;
+      const currentPricePx = latestCandle
+        ? latestCandle.direction === CandleDirection.BULLISH
+          ? Math.min(latestCandle.bodyTopPx, latestCandle.bodyBottomPx)
+          : latestCandle.direction === CandleDirection.BEARISH
+            ? Math.max(latestCandle.bodyTopPx, latestCandle.bodyBottomPx)
+            : (latestCandle.bodyTopPx + latestCandle.bodyBottomPx) / 2
         : null;
 
       if (currentPricePx !== null) {

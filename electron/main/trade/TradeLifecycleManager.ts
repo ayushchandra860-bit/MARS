@@ -107,7 +107,7 @@ export class TradeLifecycleManager {
     confidence?: CanonicalConfidence;
     entryPrice?: string | null;
     reasons?: string[];
-    timeframe?: string;
+    timeframe?: string | null;
     regime?: string;
     mlFeatures?: number[];
     eventId?: string;

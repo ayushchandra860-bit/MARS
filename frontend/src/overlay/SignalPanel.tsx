@@ -153,8 +153,8 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
     else countdownDisplay = '--';
   }
 
-  const displayExpiry = isAssetLocked ? (state?.recommendedExpiry || anyState.expiry || '1 min') : '\u2014';
-  const displayRisk = isAssetLocked ? (state?.risk || anyState.riskLevel || 'LOW') : '\u2014';
+  const displayExpiry = isAssetLocked ? (state?.recommendedExpiry || anyState.expiry || '\u2014') : '\u2014';
+  const displayRisk = isAssetLocked ? (state?.risk || anyState.riskLevel || 'UNASSESSED') : '\u2014';
 
   const actionColor = actionText === 'BUY' ? 'var(--color-emerald)' : actionText === 'SELL' ? 'var(--color-coral)' : actionText === 'WAIT' ? 'var(--color-amber)' : 'var(--text-muted)';
 
@@ -288,12 +288,12 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '20px', fontWeight: 800, color: actionColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{displayConfidence}</div>
             <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', marginTop: '4px', letterSpacing: '0.5px' }}>
-              {actionText === 'WAIT' ? 'WAIT SCORE' : 'CONFIDENCE'}
+              {actionText === 'WAIT' ? 'WAIT STRENGTH' : calibrationActive ? 'CALIBRATED EST.' : 'EVIDENCE CONF.'}
             </div>
             <div style={{ fontSize: '7.5px', color: calibrationActive ? 'var(--color-emerald)' : 'rgba(255,255,255,0.4)' }}>
               {actionText === 'WAIT'
                 ? 'No trade until setup confirms'
-                : calibrationActive ? 'JOURNAL-BASED WIN PROB' : 'Trade Probability'}
+                : calibrationActive ? 'JOURNAL-BASED; NOT GUARANTEED' : 'NOT A WIN PROBABILITY'}
             </div>
           </div>
         </div>
@@ -307,7 +307,7 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
 
         {actionText === 'WAIT' && (
           <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid rgba(255,193,7,0.28)', borderRadius: '7px', padding: '7px 9px', background: 'rgba(255,193,7,0.06)' }}>
-            <span style={{ fontSize: '9px', fontWeight: 800, color: 'var(--text-muted)', letterSpacing: '0.5px' }}>WAIT SCORE</span>
+            <span style={{ fontSize: '9px', fontWeight: 800, color: 'var(--text-muted)', letterSpacing: '0.5px' }}>WAIT STRENGTH</span>
             <span style={{ fontSize: '12px', fontWeight: 900, color: 'var(--color-amber)', fontFamily: 'var(--font-mono)' }}>WAIT {waitScore}%</span>
           </div>
         )}
@@ -334,7 +334,7 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
             <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>{isOffline ? '--' : displayExpiry}</div>
           </div>
           <div>
-            <div className="detail-label" style={{ fontSize: '9px', letterSpacing: '0.5px' }}>RISK</div>
+            <div className="detail-label" style={{ fontSize: '9px', letterSpacing: '0.5px' }}>SETUP RISK</div>
             <div style={{ fontSize: '12px', fontWeight: 700, color: displayRisk === 'LOW' ? 'var(--color-emerald)' : displayRisk === 'HIGH' ? 'var(--color-coral)' : 'var(--color-amber)', fontFamily: 'var(--font-mono)' }}>{isOffline ? '--' : displayRisk}</div>
           </div>
         </div>
@@ -398,7 +398,7 @@ function SignalPanelComponent({ state }: SignalPanelProps) {
                 </div>
               </div>
               <div>
-                <div className="detail-label" style={{ fontSize: '8px', letterSpacing: '0.5px' }}>WIN PROB</div>
+                <div className="detail-label" style={{ fontSize: '8px', letterSpacing: '0.5px' }}>ENTRY SCORE</div>
                 <div style={{ fontSize: '11px', fontWeight: 800, color: tradeWinProb !== null ? (tradeWinProb >= 60 ? 'var(--color-emerald)' : 'var(--color-amber)') : 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
                   {tradeWinProb !== null ? `${tradeWinProb}%` : '--'}
                 </div>

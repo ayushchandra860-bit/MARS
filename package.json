@@ -1,7 +1,7 @@
 {
   "name": "mars-pro",
-  "version": "3.0.1-rc.4",
-  "description": "MARS PRO — transparent AI-assisted market analysis and manual fixed-time trading decision support",
+  "version": "3.0.1-rc.5",
+  "description": "MARS PRO \u2014 transparent AI-assisted market analysis and manual fixed-time trading decision support",
   "author": "MARS PRO Team",
   "private": true,
   "main": "dist-electron/main/main.js",
@@ -56,11 +56,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "resources/assets/app.ico"
