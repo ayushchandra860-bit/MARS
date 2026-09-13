@@ -1,0 +1,69 @@
+name: Build and publish RC6
+
+on:
+  push:
+    branches: [fix/runtime-scanner-warmup-rc6]
+    paths: [.github/workflows/publish-rc6.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      GH_TOKEN: ${{ github.token }}
+      TAG: v3.0.1-rc.6
+      TARGET: 5219b8bd99ab2e14e68180472647a742899828c5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify and package
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm exec electron-builder -- --win --x64 --publish never
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $apps = @(Get-ChildItem release -Filter *.exe -File)
+          if ($apps.Count -lt 2) { throw 'Installer or portable app missing.' }
+          $apps | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding utf8 release/SHA256SUMS.txt
+      - name: Publish prerelease
+        shell: pwsh
+        run: |
+          @"
+          RC6 fixes the live scanner quality-gate stall shown on the Olymp Trade DEMO chart.
+
+          It aligns the scanner and safety gate at three validated candles, keeps valid chart cache usable for its full bounded lifetime, normalizes broker timeframe labels, and shows exact rejection details while keeping unsafe data on WAIT.
+
+          MARS is manual decision-support software, not a profit guarantee. Validate this build in DEMO mode first.
+          "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
+          $assets = @(Get-ChildItem release -File | Where-Object { $_.Extension -eq '.exe' -or $_.Name -eq 'SHA256SUMS.txt' } | ForEach-Object { $_.FullName })
+          $output = @()
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $output += (& gh release upload $env:TAG @assets --clobber 2>&1)
+            if ($LASTEXITCODE -eq 0) { $output += (& gh release edit $env:TAG --title "MARS PRO V3 $env:TAG" --notes-file release/RELEASE_NOTES.md --prerelease 2>&1) }
+          } else {
+            $output += (& gh release create $env:TAG @assets --target $env:TARGET --title "MARS PRO V3 $env:TAG" --notes-file release/RELEASE_NOTES.md --prerelease 2>&1)
+          }
+          $status = $LASTEXITCODE
+          $output | Set-Content -Encoding utf8 .github/rc6-release-result.txt
+          if ($status -ne 0) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -f .github/rc6-release-result.txt
+            git commit -m "ci: capture RC6 release failure"
+            git push origin HEAD:fix/runtime-scanner-warmup-rc6
+            exit $status
+          }
