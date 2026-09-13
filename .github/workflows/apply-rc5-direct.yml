@@ -1,0 +1,52 @@
+name: Directly apply RC5 product patch
+
+on:
+  push:
+    branches:
+      - fix/decision-support-safety-rc5
+    paths:
+      - .github/workflows/apply-rc5-direct.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply and commit product patch
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/rc5-direct.txt"
+          set +e
+          (
+            cat .github/rc5-text/part0.py .github/rc5-text/part1.py .github/rc5-text/part2.py > "$RUNNER_TEMP/apply-rc5.py"
+            python3 -m py_compile "$RUNNER_TEMP/apply-rc5.py"
+            python3 "$RUNNER_TEMP/apply-rc5.py"
+          ) > "$log" 2>&1
+          status=$?
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$status" -ne 0 ]; then
+            git reset --hard HEAD
+            cp "$log" .github/rc5-text/direct-error.txt
+            git add -f .github/rc5-text/direct-error.txt
+            git commit -m "ci: capture direct RC5 patch error"
+            git push origin HEAD:fix/decision-support-safety-rc5
+            exit "$status"
+          fi
+
+          rm -rf .github/rc5-text .github/rc5-resume
+          rm -f .github/workflows/apply-rc5-direct.yml .github/workflows/apply-rc5-text.yml .github/workflows/apply-rc5-resume.yml
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: complete RC5 decision-support hardening"
+          git push origin HEAD:fix/decision-support-safety-rc5
