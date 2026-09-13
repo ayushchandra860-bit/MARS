@@ -1,3 +1,0 @@
-RC5 text patch applied
-
-status=0 run=34746607254
