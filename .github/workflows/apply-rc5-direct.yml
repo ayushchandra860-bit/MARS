@@ -1,4 +1,4 @@
-name: Atomically apply RC5 product patch
+name: Clean temporary RC5 payloads
 
 on:
   push:
@@ -11,44 +11,18 @@ permissions:
   contents: write
 
 jobs:
-  apply-or-report:
+  cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Apply product patch or publish exact error
+      - name: Remove temporary payloads
         shell: bash
         run: |
-          log="$RUNNER_TEMP/rc5-apply-output.txt"
-          script="$RUNNER_TEMP/apply-rc5.py"
-          set +e
-          cat .github/rc5-text/part0.py .github/rc5-text/part1.py .github/rc5-text/part2.py > "$script"
-          python3 -m py_compile "$script" > "$log" 2>&1
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            python3 "$script" >> "$log" 2>&1
-            status=$?
-          fi
-          set -e
-
+          rm -rf .github/rc5-text .github/rc5-resume
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if [ "$status" -ne 0 ]; then
-            git reset --hard HEAD
-            cp "$log" .github/rc5-text/direct-error.txt
-            printf '\nstatus=%s run=%s\n' "$status" "$GITHUB_RUN_ID" >> .github/rc5-text/direct-error.txt
-            git add -f .github/rc5-text/direct-error.txt
-            git commit -m "ci: capture exact RC5 patch error"
-          else
-            git checkout -- .github/workflows/windows-installer.yml
-            cp "$log" .github/rc5-text/direct-success.txt
-            printf '\nstatus=0 run=%s\n' "$GITHUB_RUN_ID" >> .github/rc5-text/direct-success.txt
-            git add -A
-            git commit -m "fix: apply RC5 decision-support hardening"
-          fi
-
+          git add -A
+          git commit -m "chore: remove temporary RC5 payloads"
           git push origin HEAD:fix/decision-support-safety-rc5
