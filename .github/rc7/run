@@ -1,1 +1,2 @@
-RC7 runtime-context correction requested after user-device screenshot: INVALID_TIMEFRAME with visible 1 min duration and contradictory TRADE ACTIVE state.
+attempt=2
+reason=fix nullable expiry rounding and active-trade context typing
