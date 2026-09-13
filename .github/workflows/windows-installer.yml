@@ -14,7 +14,7 @@ on:
         description: Release tag when publishing
         required: true
         type: string
-        default: v3.0.1-rc.4
+        default: v3.0.1-rc.5
   push:
     branches: [main]
     tags: ['v*']
@@ -194,11 +194,18 @@ jobs:
           if ($files.Count -lt 3) { throw 'Installer, portable app, or checksums are missing.' }
           $paths = $files | ForEach-Object { $_.FullName }
           @"
-          MARS PRO V3 Windows trade-journal and verified-learning release candidate.
+          MARS PRO V3 Windows decision-support safety release candidate.
 
           This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
 
-          Trade journal and learning corrections in rc.4:
+          Decision-support safety changes in rc.5:
+          - treats BUY, SELL, and WAIT as first-class decisions and applies WAIT immediately
+          - blocks actionable output when quote, timeframe, freshness, or chart quality is unsafe
+          - clears stale quote and indicative P&L instead of displaying frozen values
+          - separates evidence confidence, calibrated estimate, setup risk, and entry score
+          - removes fabricated risk, expiry, and support/resistance point defaults
+
+          Trade journal and verified-learning corrections in rc.4 remain included:
           - counts every captured execution in the authoritative trade ledger
           - separates registered, active/unresolved, completed, and ML-clean sample totals
           - fills missing optional click facts only from a fresh allowlisted-page snapshot
