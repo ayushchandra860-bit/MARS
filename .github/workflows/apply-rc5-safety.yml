@@ -1,0 +1,58 @@
+name: Apply RC5 decision-support safety
+
+on:
+  push:
+    branches:
+      - fix/decision-support-safety-rc5
+    paths:
+      - .github/workflows/apply-rc5-safety.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Reconstruct and apply safety patch
+        shell: bash
+        run: |
+          cat .github/rc5-patch/chunk-0.b64 .github/rc5-patch/chunk-1.b64 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/apply-rc5.py"
+          python "$RUNNER_TEMP/apply-rc5.py"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit IPC contract
+        run: npm run audit:ipc
+
+      - name: Typecheck Electron and frontend
+        run: npm run typecheck
+
+      - name: Run full regression suite
+        run: npm test -- --run
+
+      - name: Verify production build
+        run: npm run build
+
+      - name: Commit verified product patch
+        shell: bash
+        run: |
+          rm -rf .github/rc5-patch
+          rm -f .github/workflows/apply-rc5-safety.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: enforce disciplined decision-support safety"
+          git push origin HEAD:fix/decision-support-safety-rc5
