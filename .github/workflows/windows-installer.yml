@@ -14,7 +14,7 @@ on:
         description: Release tag when publishing
         required: true
         type: string
-        default: v3.0.1-rc.5
+        default: v3.0.1-rc.6
   push:
     branches: [main]
     tags: ['v*']
@@ -198,7 +198,14 @@ jobs:
 
           This unsigned prerelease includes the Windows installer, portable app, and SHA-256 checksums.
 
-          Decision-support safety changes in rc.5:
+          Runtime scanner recovery in rc.6:
+          - aligns the scanner and safety gate on three validated candles for usable evidence
+          - keeps a valid chart cache usable for its complete bounded lifetime instead of rejecting it after six seconds
+          - normalizes broker duration labels before context matching and validation
+          - treats expected chart warm-up as a safe WAIT state and shows the exact rejection reason
+          - adds a regression scenario for Maha Jantar Index, a live quote, and three clean candles
+
+          Decision-support safety changes in rc.5 remain included:
           - treats BUY, SELL, and WAIT as first-class decisions and applies WAIT immediately
           - blocks actionable output when quote, timeframe, freshness, or chart quality is unsafe
           - clears stale quote and indicative P&L instead of displaying frozen values
