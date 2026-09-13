@@ -1,0 +1,234 @@
+name: Apply runtime scanner recovery hotfix
+
+on:
+  push:
+    branches:
+      - fix/runtime-scanner-warmup-rc6
+    paths:
+      - .github/workflows/apply-runtime-scanner-rc6.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply, verify, and commit hotfix
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/rc6-hotfix.log"
+          set +e
+          python3 - <<'PY' > "$log" 2>&1
+          from pathlib import Path
+          import json
+
+          root = Path.cwd()
+
+          def once(text, old, new, label):
+              if old not in text:
+                  raise RuntimeError(f"{label}: marker not found")
+              return text.replace(old, new, 1)
+
+          live_path = root / 'electron/main/scanner/LiveScanner.ts'
+          live = live_path.read_text(encoding='utf-8')
+          live = once(live,
+              '  private static readonly MIN_SIGNAL_CANDLES = 8;',
+              '  private static readonly MIN_SIGNAL_CANDLES = 3;',
+              'align candle threshold')
+          live = once(live,
+              """      if (snapshot?.platformMode) this.ocrService.extractPlatformMode(snapshot.platformMode);
+              if (snapshot?.timeframe) this.ocrService.extractTimeframeFromText(snapshot.timeframe);
+
+              const now = Date.now();""",
+              """      if (snapshot?.platformMode) this.ocrService.extractPlatformMode(snapshot.platformMode);
+              const normalizedSnapshotTimeframe = snapshot?.timeframe
+                ? this.ocrService.extractTimeframeFromText(snapshot.timeframe)
+                : null;
+
+              const now = Date.now();""",
+              'normalize snapshot timeframe')
+          live = once(live,
+              "      const activeTimeframeKey = snapshot?.timeframe?.trim().toLowerCase() || null;",
+              "      const activeTimeframeKey = normalizedSnapshotTimeframe?.trim().toLowerCase() || null;",
+              'normalized context key')
+          live = once(live,
+              "          snapshot?.timeframe || null,",
+              "          normalizedSnapshotTimeframe,",
+              'fast observation timeframe')
+          live = once(live,
+              "      const extractedTimeframe = snapshot?.timeframe || (sourceText ? this.ocrService.extractTimeframeFromText(sourceText) : null);",
+              "      const extractedTimeframe = normalizedSnapshotTimeframe || (sourceText ? this.ocrService.extractTimeframeFromText(sourceText) : null);",
+              'heavy observation timeframe')
+          live = once(live,
+              '    const cacheDegraded = cacheAge > LiveScanner.HEAVY_SCAN_INTERVAL_MS * 2;',
+              '    const cacheDegraded = cacheAge > LiveScanner.CANDLE_CACHE_MAX_AGE_MS;',
+              'cache quality window')
+          live_path.write_text(live, encoding='utf-8')
+
+          controller_path = root / 'electron/main/lifecycle/AnalysisController.ts'
+          controller = controller_path.read_text(encoding='utf-8')
+          controller = once(controller,
+              "import { isValidAssetName, AnalysisMode } from '../../../shared/types/canonical';",
+              "import { isValidAssetName, AnalysisMode, QualityGateRejection } from '../../../shared/types/canonical';",
+              'quality rejection import')
+          old_gate = """      const qualityCheck = this.qualityGate.evaluate(scanResultObservation, true);
+              if (!qualityCheck.passed) {
+                // A rejected observation cannot create a signal, but existing trades
+                // still need expiry processing and the UI must show a real WAIT state.
+                this.updateTradeLifecycle(scanResultObservation);
+                this.emitPipelineStatus(
+                  SystemStatus.DEGRADED,
+                  `Live data warming or rejected: ${qualityCheck.reason || 'quality gate failed'}.`,
+                  scanResultObservation,
+                );
+                return;
+              }
+
+              const features = this.featureExtractor.extract(scanResultObservation);"""
+          new_gate = """      const qualityCheck = this.qualityGate.evaluate(scanResultObservation, true);
+              if (!qualityCheck.passed) {
+                // A rejected observation cannot create a signal, but expected chart warm-up
+                // is a safe WAIT state rather than an application failure.
+                this.updateTradeLifecycle(scanResultObservation);
+                const rejection = qualityCheck.rejection || QualityGateRejection.LOW_DATA_QUALITY;
+                const detail = qualityCheck.detail || qualityCheck.reason || 'Quality gate rejected the observation';
+                const warming = rejection === QualityGateRejection.INSUFFICIENT_CANDLES
+                  || rejection === QualityGateRejection.LOW_CANDLE_QUALITY
+                  || rejection === QualityGateRejection.LOW_DATA_QUALITY;
+                scanResult.diagnosticsTracker?.recordStage(
+                  ScannerStage.QUALITY_GATE,
+                  StageStatus.FAIL,
+                  `${rejection}: ${detail}`,
+                );
+                if (scanResult.diagnosticsTracker) {
+                  this.latestDiagnosticsReport = scanResult.diagnosticsTracker.generateReport();
+                }
+                this.emitPipelineStatus(
+                  warming ? SystemStatus.SCANNING : SystemStatus.DEGRADED,
+                  `WAIT • ${rejection}: ${detail}`,
+                  scanResultObservation,
+                );
+                return;
+              }
+              scanResult.diagnosticsTracker?.recordStage(
+                ScannerStage.QUALITY_GATE,
+                StageStatus.PASS,
+                qualityCheck.detail || 'Observation passed the quality gate',
+              );
+              if (scanResult.diagnosticsTracker) {
+                this.latestDiagnosticsReport = scanResult.diagnosticsTracker.generateReport();
+              }
+
+              const features = this.featureExtractor.extract(scanResultObservation);"""
+          controller = once(controller, old_gate, new_gate, 'quality status detail')
+          controller_path.write_text(controller, encoding='utf-8')
+
+          test_path = root / 'tests/runtime-scanner-warmup.test.ts'
+          test_path.write_text("""import { describe, expect, it } from 'vitest';
+          import { LiveScanner } from '../electron/main/scanner/LiveScanner';
+          import { DataQualityGate } from '../electron/main/market/DataQualityGate';
+          import { PlatformMode } from '../shared/types/canonical';
+          import { CandleDirection, QualityLevel } from '../shared/types/scanner';
+
+          const candles = Array.from({ length: 3 }, (_, index) => ({
+            xPx: index * 10,
+            wickTopPx: 1,
+            bodyTopPx: 3,
+            bodyBottomPx: 7,
+            wickBottomPx: 9,
+            direction: CandleDirection.BULLISH,
+            bodySizePx: 4,
+            rangePx: 8,
+            quality: 0.95,
+          }));
+
+          describe('runtime scanner warm-up recovery', () => {
+            it('treats three clean detected candles as acceptable evidence', () => {
+              const scanner = new LiveScanner() as any;
+              expect(scanner.deriveDataQuality(3, QualityLevel.ACCEPTABLE, 0.92, 'Maha Jantar Index'))
+                .toBe(QualityLevel.ACCEPTABLE);
+            });
+
+            it('accepts normalized and broker-style minute labels', () => {
+              expect(DataQualityGate.isSupportedTimeframe('1m')).toBe(true);
+              expect(DataQualityGate.isSupportedTimeframe('1 min')).toBe(true);
+            });
+
+            it('allows a clean three-candle demo observation through the safety gate', () => {
+              const gate = new DataQualityGate();
+              expect(gate.evaluate({
+                observationId: 'warmup', sessionId: 's', frameId: 'f', timestamp: Date.now(),
+                platformMode: PlatformMode.DEMO, asset: 'Maha Jantar Index', timeframe: '1m', currentPrice: 8095.6733,
+                captureQuality: QualityLevel.HIGH, chartQuality: QualityLevel.HIGH,
+                candleQuality: QualityLevel.ACCEPTABLE, dataQuality: QualityLevel.ACCEPTABLE, candles,
+                trendEvidence: null, momentumEvidence: null, volatilityEvidence: null,
+                structureEvidence: null, supportResistanceEvidence: null, patternEvidence: null,
+              }, true).passed).toBe(true);
+            });
+          });
+          """, encoding='utf-8')
+
+          package_path = root / 'package.json'
+          package = json.loads(package_path.read_text(encoding='utf-8'))
+          package['version'] = '3.0.1-rc.6'
+          package_path.write_text(json.dumps(package, indent=2) + '\n', encoding='utf-8')
+
+          lock_path = root / 'package-lock.json'
+          lock = json.loads(lock_path.read_text(encoding='utf-8'))
+          lock['version'] = '3.0.1-rc.6'
+          lock['packages']['']['version'] = '3.0.1-rc.6'
+          lock_path.write_text(json.dumps(lock, indent=2) + '\n', encoding='utf-8')
+
+          contract_path = root / 'tests/rc3-final-performance-contract.test.ts'
+          contract = contract_path.read_text(encoding='utf-8').replace('3.0.1-rc.5', '3.0.1-rc.6')
+          contract_path.write_text(contract, encoding='utf-8')
+          print('RC6 runtime scanner hotfix applied')
+          PY
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            npm ci >> "$log" 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            npm run verify:ipc >> "$log" 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            npm run typecheck >> "$log" 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            npm test -- tests/runtime-scanner-warmup.test.ts tests/decision-support-safety.test.ts >> "$log" 2>&1
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            npm run build >> "$log" 2>&1
+            status=$?
+          fi
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$status" -ne 0 ]; then
+            git reset --hard HEAD
+            cp "$log" .github/rc6-runtime-error.txt
+            git add -f .github/rc6-runtime-error.txt
+            git commit -m "ci: capture RC6 runtime hotfix error"
+            git push origin HEAD:fix/runtime-scanner-warmup-rc6
+            exit "$status"
+          fi
+
+          rm -f .github/rc6-runtime-error.txt
+          git add -A
+          git commit -m "fix: recover scanner from valid chart warm-up"
+          git push origin HEAD:fix/runtime-scanner-warmup-rc6
