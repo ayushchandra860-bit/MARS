@@ -96,7 +96,7 @@ export class DataQualityGate {
         passed: false,
         reason: FailureReasonCode.DATA_QUALITY_GATE_FAILED,
         rejection: QualityGateRejection.INVALID_TIMEFRAME,
-        detail: `Timeframe '${obs.timeframe}' is unavailable or unsupported; BUY/SELL is blocked`,
+        detail: 'Analysis horizon is not yet detected from chart timeframe or broker trade duration; WAIT is enforced',
         freshness,
         platformMode,
       };

@@ -314,7 +314,8 @@ export class AnalysisController {
         const detail = qualityCheck.detail || qualityCheck.reason || 'Quality gate rejected the observation';
         const warming = rejection === QualityGateRejection.INSUFFICIENT_CANDLES
           || rejection === QualityGateRejection.LOW_CANDLE_QUALITY
-          || rejection === QualityGateRejection.LOW_DATA_QUALITY;
+          || rejection === QualityGateRejection.LOW_DATA_QUALITY
+          || rejection === QualityGateRejection.INVALID_TIMEFRAME;
         scanResult.diagnosticsTracker?.recordStage(
           ScannerStage.QUALITY_GATE,
           StageStatus.FAIL,
@@ -602,6 +603,10 @@ export class AnalysisController {
     return text.length > 1 && !['▲', '▼', 'UNKNOWN'].includes(text.toUpperCase());
   }
 
+  private getTradeSource(signalId?: string | null): 'SIGNAL' | 'MANUAL' {
+    return String(signalId || '').startsWith('signal-') ? 'SIGNAL' : 'MANUAL';
+  }
+
   private getLatestObservedPrice(observation?: any): number | null {
     const observedAt = typeof observation?.timestamp === 'number' ? observation.timestamp : 0;
     if (!observedAt || Date.now() - observedAt > 5000 || observedAt - Date.now() > 1000) return null;
@@ -765,7 +770,7 @@ export class AnalysisController {
     this.emitPerformanceRefresh();
   }
 
-  private buildActiveTradeContext(deterioration?: string, observation?: any) {
+  private buildActiveTradeContext(deterioration?: string, observation?: any): OverlayState['activeTradeContext'] {
     const now = Date.now();
     const activeTrades = TradeLifecycleManager.getInstance().getActiveTrades();
 
@@ -800,6 +805,7 @@ export class AnalysisController {
 
       return {
         signalId: activeTrade.signalId || `trade-${activeTrade.id}`,
+        source: this.getTradeSource(activeTrade.signalId),
         originalAction: activeTrade.direction,
         originalConfidence: activeTrade.confidence ?? 0,
         entryTimestamp: activeTrade.entryTimestamp,
@@ -834,6 +840,7 @@ export class AnalysisController {
 
     return {
       signalId: this.activeSignal.signalId,
+      source: 'SIGNAL',
       originalAction: this.activeSignal.action,
       originalConfidence: this.activeSignal.originalConfidence,
       entryTimestamp: this.activeSignal.confirmedAt,
@@ -998,6 +1005,7 @@ export class AnalysisController {
       effectiveTradeStatus = remaining > 0 ? 'TRADE ACTIVE' : 'RESULT PENDING';
       activeTradeContext = {
         signalId: activeTrade.signalId || `trade-${activeTrade.id}`,
+        source: this.getTradeSource(activeTrade.signalId),
         originalAction: activeTrade.direction,
         originalConfidence: activeTrade.confidence ?? 0,
         entryTimestamp: activeTrade.entryTimestamp,
@@ -1412,10 +1420,23 @@ export class AnalysisController {
       }
     }
 
+    const eventExpirySeconds = Number((event as any).expirySeconds ?? nodeInfo.expirySeconds);
+    const explicitExpiryText = (event as any).expiryText || nodeInfo.expiryText || nodeInfo.expiryLabel || null;
+    const configuredExpiry = this.currentSettings.expiryOverride !== 'auto'
+      ? this.expiryEngine.presetToLabel(this.currentSettings.expiryOverride)
+      : null;
     const expiryLabel = activeSignalMatches
       ? this.activeSignal!.expiryLabel
-      : (nodeInfo.expiryLabel || nodeInfo.expiryText || this.expiryEngine.presetToLabel(this.currentSettings.expiryOverride === 'auto' ? '1m' : this.currentSettings.expiryOverride));
-    const expirySeconds = ExpiryEngine.labelToSeconds(expiryLabel) || 60;
+      : (explicitExpiryText || configuredExpiry);
+    const expirySeconds = activeSignalMatches
+      ? this.activeSignal!.expirySec
+      : Number.isFinite(eventExpirySeconds) && eventExpirySeconds > 0
+        ? Math.min(24 * 60 * 60, Math.round(eventExpirySeconds))
+        : ExpiryEngine.labelToSeconds(expiryLabel);
+    if (!expirySeconds) {
+      console.warn('[MARS TRADE] Manual click was not auto-tracked because duration evidence was unavailable.');
+      return;
+    }
     const signalId = activeSignalMatches
       ? this.activeSignal!.signalId
       : `manual-signal-${event.eventId || Date.now()}`;
@@ -1454,6 +1475,7 @@ export class AnalysisController {
         tradeStatus: 'TRADE ACTIVE',
         activeTradeContext: {
           signalId: confirmedSignalId,
+          source: activeSignalMatches ? 'SIGNAL' : 'MANUAL',
           originalAction: registeredTrade.direction,
           originalConfidence: registeredTrade.confidence ?? 0,
           entryTimestamp: registeredTrade.entryTimestamp,

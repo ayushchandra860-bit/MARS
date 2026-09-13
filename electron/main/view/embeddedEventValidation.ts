@@ -12,7 +12,7 @@ export interface BrowserTradeClickEvent {
   timestamp: number;
   asset: string | null;
   expiryText: string | null;
-  expirySeconds: number;
+  expirySeconds: number | null;
   entryPrice: number | null;
   platformMode: PlatformMode;
   nodeInfo: Record<string, unknown>;
@@ -58,6 +58,20 @@ function safeNumber(value: unknown, min: number, max: number): number | null {
   return Number.isFinite(numeric) && numeric >= min && numeric <= max ? numeric : null;
 }
 
+export function parseDurationSeconds(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim().toLowerCase();
+  const hms = text.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+  if (hms) return Math.min(86_400, Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3]));
+  const clock = text.match(/^(\d{1,2}):(\d{2})$/);
+  if (clock) return Math.min(86_400, Number(clock[1]) * 60 + Number(clock[2]));
+  const duration = text.match(/^(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)$/);
+  if (!duration) return null;
+  const multiplier = duration[2].startsWith('h') ? 3600 : duration[2].startsWith('m') ? 60 : 1;
+  const seconds = Math.round(Number(duration[1]) * multiplier);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(86_400, seconds) : null;
+}
+
 function safeTimestamp(value: unknown, now = Date.now()): number {
   const numeric = safeNumber(value, now - 24 * 60 * 60 * 1000, now + 5 * 60 * 1000);
   return numeric === null ? now : Math.round(numeric);
@@ -73,13 +87,14 @@ export function parseBrowserTradeClickMessage(message: string, now = Date.now())
   const executionId = safeId(data.executionId) || eventId;
   if (!action || !eventId || !executionId) return null;
 
-  const expirySeconds = safeNumber(data.expirySeconds, 1, 24 * 60 * 60) ?? 60;
+  const expiryText = safeText(data.expiryText, 64);
+  const expirySeconds = safeNumber(data.expirySeconds, 1, 24 * 60 * 60)
+    ?? parseDurationSeconds(expiryText);
   const entryPrice = safeNumber(data.entryPrice, Number.MIN_VALUE, Number.MAX_VALUE);
   const platformMode = data.platformMode === PlatformMode.LIVE
     ? PlatformMode.LIVE
     : data.platformMode === PlatformMode.DEMO ? PlatformMode.DEMO : PlatformMode.UNKNOWN;
   const asset = safeText(data.asset, 80);
-  const expiryText = safeText(data.expiryText, 64);
 
   return {
     action,
@@ -88,7 +103,7 @@ export function parseBrowserTradeClickMessage(message: string, now = Date.now())
     timestamp: safeTimestamp(data.timestamp, now),
     asset,
     expiryText,
-    expirySeconds: Math.round(expirySeconds),
+    expirySeconds: expirySeconds === null ? null : Math.round(expirySeconds),
     entryPrice,
     platformMode,
     nodeInfo: {

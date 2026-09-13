@@ -35,6 +35,9 @@ export interface EmbeddedMarketSnapshot {
   asset: string | null;
   price: number | null;
   timeframe: string | null;
+  chartTimeframe: string | null;
+  tradeDuration: string | null;
+  timeframeSource: 'CHART_TIMEFRAME' | 'TRADE_DURATION' | 'NONE';
   platformMode: 'DEMO' | 'LIVE' | 'UNKNOWN';
   title: string;
   observedAt: number;
@@ -55,16 +58,22 @@ function parseMarketSnapshotMessage(message: string): EmbeddedMarketSnapshot | n
     const asset = typeof raw.asset === 'string' && raw.asset.trim().length >= 2 && raw.asset.length <= 80
       ? raw.asset.trim()
       : null;
-    const timeframe = typeof raw.timeframe === 'string' && raw.timeframe.length <= 30
-      ? raw.timeframe.trim() || null
+    const boundedText = (value: unknown): string | null => typeof value === 'string' && value.length <= 30
+      ? value.trim() || null
       : null;
+    const timeframe = boundedText(raw.timeframe);
+    const chartTimeframe = boundedText(raw.chartTimeframe);
+    const tradeDuration = boundedText(raw.tradeDuration);
+    const timeframeSource = raw.timeframeSource === 'CHART_TIMEFRAME' || raw.timeframeSource === 'TRADE_DURATION'
+      ? raw.timeframeSource
+      : 'NONE';
     const mode = raw.platformMode === 'DEMO' || raw.platformMode === 'LIVE'
       ? raw.platformMode
       : 'UNKNOWN';
     const title = typeof raw.title === 'string' ? raw.title.slice(0, 300) : '';
     if (price === null && asset === null) return null;
 
-    return { asset, price, timeframe, platformMode: mode, title, observedAt };
+    return { asset, price, timeframe, chartTimeframe, tradeDuration, timeframeSource, platformMode: mode, title, observedAt };
   } catch {
     return null;
   }
@@ -201,6 +210,10 @@ export class EmbeddedBrowserManager {
       const click = parseBrowserTradeClickMessage(message);
       if (click) {
         const contextualClick = enrichBrowserTradeClick(click, this.latestMarketSnapshot);
+        if (contextualClick.expirySeconds === null) {
+          console.warn('[MARS Browser Detector] Trade click was observed but not auto-tracked because broker duration was unavailable.');
+          return;
+        }
         const manager = RunningTradeManager.getInstance();
         const evidence = TrustedExecutionEvidenceRegistry.getInstance();
         evidence.stage({
