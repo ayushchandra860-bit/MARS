@@ -1,0 +1,61 @@
+name: Open RC6 hotfix pull request
+
+on:
+  push:
+    branches:
+      - fix/runtime-scanner-warmup-rc6
+    paths:
+      - .github/workflows/open-rc6-pr.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/pr-body.md" <<'EOF'
+          ## Problem
+          RC5 can remain stuck in `DEGRADED` / `DATA_QUALITY_GATE_FAILED` on a visible Olymp Trade demo chart.
+
+          ## Fix
+          - Align scanner and quality-gate minimum at three validated candles.
+          - Keep bounded chart-cache evidence usable for its complete 12-second lifetime.
+          - Normalize broker timeframe labels before context matching.
+          - Preserve fail-closed `WAIT` behavior for rejected data.
+          - Show and record the exact quality rejection; chart warm-up is `SCANNING/WAIT` rather than a false app failure.
+          - Bump to `3.0.1-rc.6`.
+
+          ## Verification already run
+          IPC audit, typecheck, targeted scanner/safety tests, and production build passed. Full PR checks and the Windows installer must pass before merge.
+
+          Logged-in Olymp Trade behavior still needs confirmation on the user's Windows DEMO session after installing rc.6. MARS is decision support, not a profit guarantee.
+          EOF
+          set +e
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head fix/runtime-scanner-warmup-rc6 \
+            --title "fix: recover live scanner from RC5 quality-gate stall" \
+            --body-file "$RUNNER_TEMP/pr-body.md" > "$RUNNER_TEMP/pr-result.log" 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            cp "$RUNNER_TEMP/pr-result.log" .github/rc6-pr-error.txt
+            git add -f .github/rc6-pr-error.txt
+            git commit -m "ci: capture RC6 pull-request error"
+            git push origin HEAD:fix/runtime-scanner-warmup-rc6
+            exit "$status"
+          fi
+          cat "$RUNNER_TEMP/pr-result.log"
