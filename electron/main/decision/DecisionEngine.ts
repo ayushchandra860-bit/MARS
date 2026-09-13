@@ -27,6 +27,8 @@ import {
   AnalysisMode,
   CanonicalConfidence,
   CanonicalRisk,
+  DataFreshness,
+  computeFreshness,
   fromLegacyMode,
 } from '../../../shared/types/canonical';
 import { EvidenceEngine } from './EvidenceEngine';

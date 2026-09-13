@@ -35,6 +35,8 @@ export enum WaitReason {
   NO_CLEAR_SETUP = 'No clear setup',
   DATA_NOT_READY = 'Data not ready or insufficient quality',
   DATA_STALE = 'Market data is stale or expired',
+  TIMEFRAME_UNAVAILABLE = 'Trading timeframe is unavailable or unsupported',
+  PRICE_UNAVAILABLE = 'Current market quote is unavailable or invalid',
   DEMO_ACCOUNT_BLOCKED = 'Demo account blocked from live signal generation',
 }
 

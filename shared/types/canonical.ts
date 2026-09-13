@@ -54,7 +54,7 @@ export enum PlatformMode {
 export enum DataFreshness {
   /** Data is within acceptable freshness window */
   FRESH = 'FRESH',
-  /** Data is aging but still usable with caution */
+  /** Data may be shown as context, but must not create an actionable signal. */
   STALE = 'STALE',
   /** Data is too old to be used for decision making */
   EXPIRED = 'EXPIRED',
@@ -150,6 +150,7 @@ export enum QualityGateRejection {
   EXPIRED_DATA = 'EXPIRED_DATA',
   INVALID_ASSET = 'INVALID_ASSET',
   INVALID_PRICE = 'INVALID_PRICE',
+  INVALID_TIMEFRAME = 'INVALID_TIMEFRAME',
   INSUFFICIENT_CANDLES = 'INSUFFICIENT_CANDLES',
   LOW_CANDLE_QUALITY = 'LOW_CANDLE_QUALITY',
   LOW_DATA_QUALITY = 'LOW_DATA_QUALITY',
