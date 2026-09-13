@@ -12,19 +12,25 @@ permissions:
 
 jobs:
   apply-and-verify:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Apply safety patch
-        id: patch
-        continue-on-error: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply patch, verify, and commit
         shell: bash
         run: |
-          python - <<'PY' > "$RUNNER_TEMP/rc5-patch.log" 2>&1
+          log="$RUNNER_TEMP/rc5-verification.log"
+          set +e
+          (
+            python3 - <<'PY'
           from pathlib import Path
           import base64, gzip
           encoded = (Path('.github/rc5-patch/chunk-0.b64').read_text().strip()
@@ -32,58 +38,28 @@ jobs:
           source = gzip.decompress(base64.b64decode(encoded))
           exec(compile(source, 'apply-rc5.py', 'exec'), {'__name__': '__main__'})
           PY
+            npm ci
+            npm run verify:ipc
+            npm run typecheck
+            npm test -- --run
+            npm run build
+          ) > >(tee "$log") 2>&1
+          status=$?
+          set -e
 
-      - name: Show patch output
-        if: always()
-        shell: bash
-        run: cat "$RUNNER_TEMP/rc5-patch.log" || true
-
-      - name: Save patch error for repair
-        if: steps.patch.outcome == 'failure'
-        shell: bash
-        run: |
-          cp "$RUNNER_TEMP/rc5-patch.log" .github/rc5-patch/error.log
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/rc5-patch/error.log
-          git commit -m "ci: capture RC5 patch error"
-          git push origin HEAD:fix/decision-support-safety-rc5
-          exit 1
 
-      - uses: actions/setup-node@v4
-        if: steps.patch.outcome == 'success'
-        with:
-          node-version: 20
-          cache: npm
+          if [ "$status" -ne 0 ]; then
+            cp "$log" .github/rc5-patch/error.log
+            git add .github/rc5-patch/error.log
+            git commit -m "ci: capture RC5 verification error"
+            git push origin HEAD:fix/decision-support-safety-rc5
+            exit "$status"
+          fi
 
-      - name: Install dependencies
-        if: steps.patch.outcome == 'success'
-        run: npm ci
-
-      - name: Audit IPC contract
-        if: steps.patch.outcome == 'success'
-        run: npm run verify:ipc
-
-      - name: Typecheck Electron and frontend
-        if: steps.patch.outcome == 'success'
-        run: npm run typecheck
-
-      - name: Run full regression suite
-        if: steps.patch.outcome == 'success'
-        run: npm test -- --run
-
-      - name: Verify production build
-        if: steps.patch.outcome == 'success'
-        run: npm run build
-
-      - name: Commit verified product patch
-        if: steps.patch.outcome == 'success'
-        shell: bash
-        run: |
           rm -rf .github/rc5-patch
           rm -f .github/workflows/apply-rc5-safety.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --check
           git commit -m "fix: enforce disciplined decision-support safety"
