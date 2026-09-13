@@ -1,2 +1,2 @@
-attempt=3
-reason=execute the known-good payload from commit 27bb2b94, then apply two bounded type corrections
+attempt=4
+reason=checkout full history so git show can read the known-good payload commit
