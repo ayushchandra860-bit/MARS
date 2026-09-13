@@ -70,3 +70,5 @@ jobs:
           git diff --cached --check
           git commit -m "fix: complete disciplined decision-support safety"
           git push origin HEAD:fix/decision-support-safety-rc5
+
+# retry after stabilizer type-narrowing fix
