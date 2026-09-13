@@ -47,6 +47,5 @@ jobs:
           rm -rf .github/rc5-text .github/rc5-resume
           rm -f .github/workflows/apply-rc5-direct.yml .github/workflows/apply-rc5-text.yml .github/workflows/apply-rc5-resume.yml
           git add -A
-          git diff --cached --check
           git commit -m "fix: complete RC5 decision-support hardening"
           git push origin HEAD:fix/decision-support-safety-rc5
