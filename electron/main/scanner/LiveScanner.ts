@@ -43,7 +43,7 @@ export class LiveScanner {
   private cachedChartRegionTimestamp = 0;
   private scanCount = 0;
   private consecutiveQuoteMisses = 0;
-  private static readonly MIN_SIGNAL_CANDLES = 8;
+  private static readonly MIN_SIGNAL_CANDLES = 3;
   private static readonly HEAVY_SCAN_INTERVAL_MS = 3000;
   private static readonly CANDLE_CACHE_MAX_AGE_MS = 12000;
   private static readonly REGION_CACHE_MAX_AGE_MS = 10000;
@@ -76,12 +76,14 @@ export class LiveScanner {
         : null;
       const titlePrice = snapshotPrice ?? this.ocrService.extractPriceFromTitle(sourceTitle);
       if (snapshot?.platformMode) this.ocrService.extractPlatformMode(snapshot.platformMode);
-      if (snapshot?.timeframe) this.ocrService.extractTimeframeFromText(snapshot.timeframe);
+      const normalizedSnapshotTimeframe = snapshot?.timeframe
+        ? this.ocrService.extractTimeframeFromText(snapshot.timeframe)
+        : null;
 
       const now = Date.now();
       const quoteObservedAt = snapshot?.observedAt ?? now;
       const activeAssetId = normalizeAsset(titleAsset, quoteObservedAt)?.assetId || null;
-      const activeTimeframeKey = snapshot?.timeframe?.trim().toLowerCase() || null;
+      const activeTimeframeKey = normalizedSnapshotTimeframe?.trim().toLowerCase() || null;
       const contextKey = activeAssetId ? `${activeAssetId}|${activeTimeframeKey || 'UNKNOWN'}` : null;
       if (contextKey && this.marketContextKey && contextKey !== this.marketContextKey) {
         this.marketContextGeneration++;
@@ -110,7 +112,7 @@ export class LiveScanner {
           diagnosticsTracker,
           now,
           quoteObservedAt,
-          snapshot?.timeframe || null,
+          normalizedSnapshotTimeframe,
         );
       }
 
@@ -137,7 +139,7 @@ export class LiveScanner {
       else extractedAsset = this.ocrService.extractAssetFromTitle(sourceText);
 
       const extractedPrice = titlePrice ?? (sourceText ? this.ocrService.extractPriceFromText(sourceText) : null);
-      const extractedTimeframe = snapshot?.timeframe || (sourceText ? this.ocrService.extractTimeframeFromText(sourceText) : null);
+      const extractedTimeframe = normalizedSnapshotTimeframe || (sourceText ? this.ocrService.extractTimeframeFromText(sourceText) : null);
       const ocrResults = this.ocrService.getCachedOcrResults();
       const cleanAsset = extractedAsset || (typeof ocrResults?.asset === 'string' ? ocrResults.asset : null);
       const cleanTimeframe = extractedTimeframe || (typeof ocrResults?.timeframe === 'string' ? ocrResults.timeframe : null);
@@ -320,7 +322,7 @@ export class LiveScanner {
     const platformMode = this.ocrService.extractPlatformMode(sourceTitle);
     const cache = this.candleCache!;
     const cacheAge = Math.max(0, now - cache.capturedAt);
-    const cacheDegraded = cacheAge > LiveScanner.HEAVY_SCAN_INTERVAL_MS * 2;
+    const cacheDegraded = cacheAge > LiveScanner.CANDLE_CACHE_MAX_AGE_MS;
     const candleQuality = cacheDegraded ? QualityLevel.LOW : cache.candleQuality;
     const candleCount = cache.candles.length;
     const dataQuality = this.deriveDataQuality(candleCount, candleQuality, cache.region.confidence, asset);
