@@ -1,2 +1,0 @@
-attempt=4
-reason=checkout full history so git show can read the known-good payload commit
