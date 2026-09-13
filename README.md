@@ -4,6 +4,10 @@ MARS PRO V3 is an experimental Windows market-analysis workstation for Olymp Tra
 
 > **Research status:** MARS has not demonstrated a reliable live-money edge. Confidence values are decision-support scores unless separately validated on clean, forward-tested data. Fixed-time trading can lose the entire stake and no software can guarantee profit.
 
+## Core product contract
+
+MARS is a **manual-trading decision-support system**, not an auto-trader or prediction guarantee. BUY, SELL, and WAIT are all valid outputs. WAIT is intentional when data is stale, incomplete, conflicting, low quality, or missing quote/timeframe context. Uncalibrated confidence is evidence strength, not win probability. See [docs/PRODUCT-PRINCIPLES.md](docs/PRODUCT-PRINCIPLES.md).
+
 ## Safety boundary
 
 - MARS does not place trades automatically.

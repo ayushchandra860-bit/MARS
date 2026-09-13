@@ -50,7 +50,7 @@ export enum SignalLifecycleStage {
 export interface ActiveTradeContext {
   signalId: string;
   originalAction: TradingAction;
-  originalConfidence: number;
+  originalConfidence: CanonicalConfidence;
   source?: 'SIGNAL' | 'MANUAL';
   entryTimestamp: number;
   recommendedExpiry: string;
@@ -184,7 +184,7 @@ export interface OverlayState {
     pnlPct: number | null;
     pnlPoints: number | null;
     remainingSeconds: number | null;
-    health: 'IN PROFIT' | 'AT ENTRY' | 'AGAINST' | 'NO TRADE';
+    health: 'IN PROFIT' | 'AT ENTRY' | 'AGAINST' | 'QUOTE UNAVAILABLE' | 'NO TRADE';
     healthReason: string;
     targetPrice: number | null;
     targetPoints: number | null;
