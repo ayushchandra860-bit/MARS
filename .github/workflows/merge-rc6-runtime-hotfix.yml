@@ -1,0 +1,68 @@
+name: Merge RC6 runtime scanner hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/merge-rc6-runtime-hotfix.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: merge-rc6-runtime-hotfix
+  cancel-in-progress: false
+
+jobs:
+  verify-and-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply exact RC6 source files and verify
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/rc6-main-merge.log"
+          set +e
+          git fetch origin fix/runtime-scanner-warmup-rc6
+          git checkout origin/fix/runtime-scanner-warmup-rc6 -- \
+            electron/main/lifecycle/AnalysisController.ts \
+            electron/main/scanner/LiveScanner.ts \
+            package.json \
+            package-lock.json \
+            tests/rc3-final-performance-contract.test.ts \
+            tests/runtime-scanner-warmup.test.ts
+          status=$?
+          if [ "$status" -eq 0 ]; then npm ci > "$log" 2>&1; status=$?; fi
+          if [ "$status" -eq 0 ]; then npm run verify:ipc >> "$log" 2>&1; status=$?; fi
+          if [ "$status" -eq 0 ]; then npm run typecheck >> "$log" 2>&1; status=$?; fi
+          if [ "$status" -eq 0 ]; then npm run test >> "$log" 2>&1; status=$?; fi
+          if [ "$status" -eq 0 ]; then npm run build >> "$log" 2>&1; status=$?; fi
+          if [ "$status" -eq 0 ]; then npm run verify:build >> "$log" 2>&1; status=$?; fi
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$status" -ne 0 ]; then
+            git reset --hard HEAD
+            cp "$log" .github/rc6-main-error.txt
+            git add -f .github/rc6-main-error.txt
+            git commit -m "ci: capture RC6 direct-merge error"
+            git push origin HEAD:main
+            exit "$status"
+          fi
+          rm -f .github/rc6-main-error.txt
+          git add \
+            electron/main/lifecycle/AnalysisController.ts \
+            electron/main/scanner/LiveScanner.ts \
+            package.json \
+            package-lock.json \
+            tests/rc3-final-performance-contract.test.ts \
+            tests/runtime-scanner-warmup.test.ts
+          git commit -m "fix: recover live scanner from RC5 quality-gate stall"
+          git push origin HEAD:main
